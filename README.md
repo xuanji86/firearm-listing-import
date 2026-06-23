@@ -1,11 +1,15 @@
 # firearm-listing-import
 
 A **Claude Code / Codex skill** that imports per‑gun photos + descriptions from local
-`with pictures/<serial>/` folders onto **Serial No** records in a [GunStore‑POS](https://github.com/xuanji86/gunstore-pos)
+`with pictures/<serial>/` folders onto **Serial No** records in a GunStore‑POS
 (Frappe/ERPNext) instance, and publishes each gun to WooCommerce as its own per‑serial product.
 
 > 给 Claude Code / Codex 用的 skill：把本地 `with pictures/<序列号>/` 文件夹里每把枪的
 > 照片 + 描述写到 POS 的 **Serial No** 上，并**按序列号**上架到 WooCommerce。
+
+> **Companion repo:** [`gunstore-pos-mcp`](https://github.com/xuanji86/gunstore-pos-mcp) — the
+> MCP server this skill uses for reads / small writes. (The skill also bundles a standalone
+> Frappe‑REST script for the image‑upload + Woo push path, so it runs without the MCP too.)
 
 ## Contents
 
