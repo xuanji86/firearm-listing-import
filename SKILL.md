@@ -11,7 +11,9 @@ description: Use when importing per-gun photos + descriptions from local "with p
 
 文件夹结构：`<root>/<序列号>/` 每个子文件夹名是枪的序列号，里面有 1 个描述 `.txt`（`description.txt` 或编号 txt）和若干照片。`main.*`（或拼错的 `mian.*`）是主图，没有 main 时按文件名排序的第一张为主图。
 
-核心工具：`scripts/firearm_listings.py`（子命令 `resolve` / `attach` / `push` / `verify` / `testconn` / `setprice`）。凭据和目标站点都从 `mcp/.env` 读取。
+**描述里的标题**：`.txt` 里如果有一行 `Title: <这把枪的标题>`（一般在 `Specifications` 段里，冒号后可有可无空格），这行就是这把枪在 WooCommerce 上**单独的商品标题**。`attach` 会把它写到该 Serial No 的 `item_name`（Woo 上架时商品名取 `Serial No.item_name`，缺省才回退到共享的 `Item.item_name` 型号名——见 `references/internals.md`），并把这行从描述正文里去掉（免得标题在描述里重复出现）。**没有 `Title:` 行**（旧格式）时不写 `item_name`，商品名照旧用型号名，`resolve` 会标 `NO-TITLE`。
+
+核心工具：`scripts/firearm_listings.py`（子命令 `resolve` / `attach` / `push` / `verify` / `testconn` / `setprice` / `settitle`）。凭据和目标站点都从 `mcp/.env` 读取。
 
 **如何运行**：用 `uv run scripts/firearm_listings.py <子命令>`（脚本带 PEP 723 内联依赖，`uv` 会自动装 `requests`），或 `mcp/.venv/bin/python scripts/firearm_listings.py <子命令>`。**别用裸 `python`**——系统默认解释器没有 `requests`，会 `ModuleNotFoundError`。
 
@@ -41,7 +43,7 @@ description: Use when importing per-gun photos + descriptions from local "with p
 - Claude Code：repo 根 `.mcp.json` 里的 `gunstore-pos`。
 - Codex：`~/.codex/config.toml` 的 `[mcp_servers.gunstore-pos]`（本机已配好，
   `uv run --directory <repo>/mcp gunstore-mcp`；server 自己从 `mcp/.env` 读凭据）。
-- 所以 `find_item`、`frappe_*`、`woo_*`、`firearms_in_stock` 等 35 个工具在两端都能用。
+- 所以 `find_item`、`frappe_*`、`woo_*`、`set_serial_title`、`firearms_in_stock` 等 36 个工具在两端都能用。
   注意 MCP 工具名前缀按各端约定（Claude Code 是 `mcp__gunstore-pos__*`），按名字调用即可。
 
 **该用 MCP 还是脚本**
@@ -51,6 +53,7 @@ description: Use when importing per-gun photos + descriptions from local "with p
 | 测试连接 | `woo_test_connection` / 任意 `frappe_get_document` | `testconn` |
 | 查序列号 / 库存 / Item | `find_item`、`frappe_list_documents`、`firearms_in_stock` | `resolve` |
 | 定价（`sell_price`） | `frappe_update_document` | `setprice` |
+| 设每把枪 Woo 标题（`item_name`） | `set_serial_title` / `frappe_update_document` | `settitle`（或 `attach` 从 `Title:` 行自动写） |
 | **按序列号上架 Woo** | ✅ `frappe_run_method` 调 `ffl_woo_sync.woocommerce.client_api.push_serial_now(serial_no)`（**别用** `woo_push_item`——它推该 item_code 下全部兄弟序列号） | ✅ `push`（批量包装**同一个** `push_serial_now`，加长超时 + 跳过已上架/未定价） |
 | **传图 + 描述 + 建 gallery** | ❌ 图片字节过不了 MCP（会撑爆上下文） | ✅ `attach`（唯一办法） |
 | 查 Woo 商品 | osa-seo `woocommerce-products-list`（仅装了该 MCP 的端，如 Claude Code） | wp-admin 搜 SKU / `curl` WC REST |
@@ -74,8 +77,9 @@ description: Use when importing per-gun photos + descriptions from local "with p
 
 ## 关键数据模型（务必理解，否则会做错）
 
-- 文件夹名 = 序列号 = ERPNext **Serial No** 记录。每把枪的照片/描述属于 **Serial No**（字段 `image` / `image_gallery` / `description`），**不是 Item**。
+- 文件夹名 = 序列号 = ERPNext **Serial No** 记录。每把枪的照片/描述/标题属于 **Serial No**（字段 `image` / `image_gallery` / `description` / `item_name`），**不是 Item**。
 - **Item 是共享的型号 SKU**：一个 Item（如 `CZ85`、`M1-30`）下挂几十个序列号。多个文件夹可能映射到同一个 Item——所以绝不能把单枪数据写到 Item 上，否则互相覆盖。
+- **每把枪的 Woo 标题 = `Serial No.item_name`**：上架时 `ffl_woo_sync` 的 payload builder 用 `Serial No.item_name` 当商品名，为空才回退到 `Item.item_name`（型号名）。所以**给每把枪写各自的 `item_name`（来自 `Title:` 行）才能让它在店里有独立标题**，否则同型号的几十把枪标题全一样。该字段 `fetch_if_empty=1`——一旦写了非空值，之后不会被型号名覆盖；`read_only` 只是后台 UI 限制，REST 照样能写。
 - Woo 上架是**按序列号**：每把枪一个 WC 商品，SKU = `item_code::serial`。用 `push_serial_now(serial_no)`，**不要**用 MCP `woo_push_item(item_code)`——那会把该 item_code 下**所有** Active 序列号一起推（如 27 把 CZ85），不只是你处理的那几把。
 - 主图：Woo 的 featured image 由 `image_gallery` 中 `is_primary=1` 的那行决定（`_resolve_image_list` 把它放到 `images[0]`）。脚本把主图放在 sort_order 0 且 is_primary 1，并同时写 Serial No 的 `image` 字段。
 
@@ -95,8 +99,9 @@ uv run scripts/firearm_listings.py resolve --root "/path/to/with pictures N"
 - `UNPRICED($0)` — 未定价；`attach` 可以做，但 `push` 会跳过，需用户先定价。
 - `has-gallery` / `woo#<id>` — 已经有照片 / 已上架（幂等，默认会跳过）。
 - `NO-DESC` — 文件夹缺 .txt。
+- `NO-TITLE` — .txt 里没有 `Title:` 行；`attach` 不会写 `item_name`，该枪 Woo 标题仍用共享型号名。新格式建议补 `Title:` 行，或事后用 `settitle` 单独补。
 
-把 resolve 结果整理成清单给用户确认后再继续。
+`resolve` 末列 `TITLE` 直接打印解析出的标题——上架前先肉眼核对每把枪的标题（这是顾客看到的商品名）。把 resolve 结果整理成清单给用户确认后再继续。
 
 ### 2. attach（写 POS：resize + 上传 + 写 gallery/描述）
 
@@ -105,9 +110,10 @@ uv run scripts/firearm_listings.py attach --root "/path/..." [--map map.json] [-
 ```
 
 - **照片必须先 resize**（脚本默认就做：~2000px 长边、JPEG q80，用 `sips`）。**不要上传原图**——原因见下面"为什么 resize"。
-- 每把枪：resize 每张图 → 上传到 POS（公开 File，attach 到该 Serial No）→ PUT 设置 `description`（来自 .txt）+ `image_gallery` + `image`（主图）。
+- 每把枪：resize 每张图 → 上传到 POS（公开 File，attach 到该 Serial No）→ PUT 设置 `description`（来自 .txt，已去掉 `Title:` 行）+ `image_gallery` + `image`（主图）+ `item_name`（来自 `Title:` 行，没有就不写）。
+- `item_name` 就是这把枪在 Woo 上的商品标题；写完后**要 `push`（或重新 push）才会反映到已上架商品**。已上架的枪改了标题，跑 `attach --force` 或 `settitle` 后必须再 `push` 一次。
 - 幂等：已有 gallery 的序列号默认跳过；要重做加 `--force`。
-- canary：先 `--only 一个序列号`，再 `verify`，再全量。
+- canary：先 `--only 一个序列号`，再 `verify`（会打印 `title=...`），再全量。
 
 ### 3. push（上架 Woo，按序列号）
 
@@ -126,7 +132,7 @@ uv run scripts/firearm_listings.py push --root "/path/..." [--map map.json] [--o
 uv run scripts/firearm_listings.py verify --root "/path/..." [--only ...]
 ```
 
-打印每个序列号的 gallery 主图是否对齐、`woo_product_id`。Woo 端确认（只上架了你处理的序列号、不是全部兄弟；价格/发布状态/featured 图正确、无重复）：登录 wp-admin 搜 SKU `item_code::序列号`，或 `curl` WC REST；Claude Code 也可用 osa-seo MCP `woocommerce-products-list`（`search_sku "<item_code>::"`）。连接/定价用脚本的 `testconn` / `setprice` 子命令，不必依赖 MCP。
+打印每个序列号的 gallery 主图是否对齐、`title`（= `Serial No.item_name`，这把枪的 Woo 商品标题）、`woo_product_id`。Woo 端确认（只上架了你处理的序列号、不是全部兄弟；标题/价格/发布状态/featured 图正确、无重复）：登录 wp-admin 搜 SKU `item_code::序列号`，或 `curl` WC REST；Claude Code 也可用 osa-seo MCP `woocommerce-products-list`（`search_sku "<item_code>::"`）。连接/定价/改标题用脚本的 `testconn` / `setprice` / `settitle` 子命令，不必依赖 MCP。
 
 ## 为什么 resize（被坑过的点）
 

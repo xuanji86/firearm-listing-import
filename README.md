@@ -23,7 +23,8 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 ## How it works (the short version)
 
 - Each folder is named after a firearm serial number and holds one description `.txt` + photos.
-- Per‑gun data lives on the **Serial No** record (`image` / `image_gallery` / `description`), **not** the model Item (one Item backs many serials).
+- Per‑gun data lives on the **Serial No** record (`image` / `image_gallery` / `description` / `item_name`), **not** the model Item (one Item backs many serials).
+- Each gun gets **its own WooCommerce listing title** from a `Title:` line in the description `.txt` → written to `Serial No.item_name` (the field the Woo payload builder uses for the product name, falling back to the shared model name). No `Title:` line ⇒ the gun keeps the shared model name (`resolve` flags `NO-TITLE`).
 - Photos are **resized (~2000px/q80) before upload** — full‑size phone photos blow past the POS→Woo 30s image‑sideload timeout.
 - Woo listing is **per serial** via `push_serial_now` (not `woo_push_item`, which would push every sibling under the same Item).
 - Image bytes go over Frappe REST `upload_file` from the script (they can't pass through MCP tool calls without exploding the agent's context).

@@ -12,8 +12,10 @@ Subcommands (run `resolve` first — it is read-only):
       Read-only plan: folder -> Serial No, status, price, photo/primary, flags.
   attach  --root DIR [--map map.json] [--only A,B] [--force]
       Resize photos (~2000px/q80) -> upload to POS -> set image_gallery +
-      image (primary) + description. Skips serials that already have a gallery
-      unless --force. Resizing is mandatory (see push timeout note below).
+      image (primary) + description + item_name (the per-gun WooCommerce listing
+      title, taken from the description's "Title:" line). Skips serials that
+      already have a gallery unless --force. Resizing is mandatory (see push
+      timeout note below).
   push    --root DIR [--map map.json] [--only A,B]
       Publish each priced + Active + not-yet-listed serial as its own WC product
       via the whitelisted push_serial_now. Skips un-priced ($0) and already-listed.
@@ -24,6 +26,9 @@ Subcommands (run `resolve` first — it is read-only):
       "test connection" tool — works on any agent via the shell).
   setprice --serial S --price N
       Set a serial's sell_price over REST (so price-setting needs no MCP).
+  settitle --serial S --title "..."
+      Set a serial's per-gun WooCommerce title (Serial No.item_name) over REST,
+      e.g. to fix a title without re-running attach. Re-push to take effect.
 
 --map is a JSON object of {folder_name: actual_serial_no} for folders whose name
 differs from the Serial No record (case/prefix/typo, or a corrected serial).
@@ -41,7 +46,7 @@ the inline metadata below) or the repo venv `mcp/.venv/bin/python`; a bare
 # dependencies = ["requests"]
 # ///
 from __future__ import annotations
-import argparse, json, os, subprocess
+import argparse, json, os, re, subprocess
 from urllib.parse import quote
 import requests
 
@@ -69,6 +74,9 @@ ENV = _find_env()
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 MAXPX, QUALITY = 2000, 80          # resize target: long edge px, JPEG quality
 PUSH_METHOD = "ffl_woo_sync.woocommerce.client_api.push_serial_now"
+# Per-gun WooCommerce title: a "Title: ..." line in the description .txt (colon may
+# have no following space; matched anywhere, line-anchored, case-insensitive).
+TITLE_RE = re.compile(r"\s*title\s*:\s*(.+?)\s*$", re.I)
 
 
 def load_cfg():
@@ -150,6 +158,30 @@ def pick_desc(fp):
     return os.path.join(fp, txts[0])
 
 
+def split_title(text):
+    """(title, body) for a description .txt.
+
+    title = the value of the first 'Title:' line (the per-gun WooCommerce listing
+    title), or None if the file has no such line. body = the text with that line
+    removed so the title isn't duplicated inside the product description. Other
+    lines (incl. the rest of the Specifications block) are kept verbatim."""
+    title, kept = None, []
+    for line in text.splitlines():
+        m = TITLE_RE.match(line)
+        if title is None and m and m.group(1).strip():
+            title = m.group(1).strip()
+            continue  # drop the Title: line from the customer-facing description
+        kept.append(line)
+    return title, "\n".join(kept).strip()
+
+
+def read_desc(desc_path):
+    """(title, body) from a description file path; ('', '') when path is None."""
+    if not desc_path:
+        return None, ""
+    return split_title(open(desc_path, encoding="utf-8", errors="replace").read())
+
+
 def resize(src, dst):
     subprocess.run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", str(QUALITY),
                     "-Z", str(MAXPX), src, "--out", dst], check=True, capture_output=True)
@@ -183,7 +215,7 @@ def targets(args):
 def cmd_resolve(args):
     ov = json.load(open(args.map)) if args.map else {}
     print(f"BASE={BASE}\n")
-    print(f"{'FOLDER':<14}{'SERIAL':<14}{'STATUS':<10}{'PRICE':<8}{'#img':<5}{'PRIMARY':<22}{'FLAGS'}")
+    print(f"{'FOLDER':<14}{'SERIAL':<14}{'STATUS':<10}{'PRICE':<8}{'#img':<5}{'PRIMARY':<22}{'FLAGS':<26}TITLE")
     seen_items = {}
     for f in targets(args):
         fp = os.path.join(args.root, f)
@@ -209,9 +241,15 @@ def cmd_resolve(args):
             if d.get("woo_product_id"):
                 flags.append(f"woo#{d['woo_product_id']}")
             seen_items.setdefault(d.get("item_code"), []).append(serial)
-        if not pick_desc(fp):
+        desc_path = pick_desc(fp)
+        title = None
+        if not desc_path:
             flags.append("NO-DESC")
-        print(f"{f:<14}{(serial or '?'):<14}{str(status):<10}{str(price):<8}{len(imgs):<5}{primary:<22}{' '.join(flags)}")
+        else:
+            title, _ = read_desc(desc_path)
+            if not title:
+                flags.append("NO-TITLE")  # no 'Title:' line — Woo falls back to the shared Item name
+        print(f"{f:<14}{(serial or '?'):<14}{str(status):<10}{str(price):<8}{len(imgs):<5}{primary:<22}{' '.join(flags):<26}{title or ''}")
     shared = {ic: ss for ic, ss in seen_items.items() if len(ss) > 1}
     if shared:
         print("\nNote — folders sharing one Item (fine: photos live per-serial):")
@@ -235,13 +273,20 @@ def cmd_attach(args):
             if d.get("image_gallery") and not args.force:
                 print(f"[{f} -> {serial}] SKIP — already has gallery (use --force)"); continue
             desc_path = pick_desc(fp)
-            description = open(desc_path, encoding="utf-8", errors="replace").read().strip() if desc_path else ""
+            title, description = read_desc(desc_path)
+            # item_name = the per-gun WooCommerce title (see references/internals.md):
+            # serial_to_product_payload uses Serial No.item_name, falling back to the
+            # shared Item name. Only send it when a 'Title:' line is present so we never
+            # blank out an existing title for an old-format folder with no title.
+            title_field = {"item_name": title} if title else {}
+            if not title:
+                print(f"  [{f} -> {serial}] NO-TITLE — no 'Title:' line; Woo keeps the shared Item name")
             imgs = list_images(fp)
             if not imgs:
-                # No photos: set description only — never blank out an existing image/gallery.
+                # No photos: set description (+ title) only — never blank out an existing image/gallery.
                 requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
-                             data=json.dumps({"description": description}), timeout=120).raise_for_status()
-                print(f"  [{f} -> {serial}] no photos — set description only\n"); continue
+                             data=json.dumps({"description": description, **title_field}), timeout=120).raise_for_status()
+                print(f"  [{f} -> {serial}] no photos — set description{' + title' if title else ''} only\n"); continue
             outdir = os.path.join(tmp, serial); os.makedirs(outdir, exist_ok=True)
             gallery, primary = [], None
             for i, name in enumerate(imgs):
@@ -254,9 +299,10 @@ def cmd_attach(args):
                 print(f"    {name} -> {url}{'  [PRIMARY]' if i == 0 else ''}")
             r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
                              data=json.dumps({"description": description, "image": primary,
-                                              "image_gallery": gallery}), timeout=120)
+                                              "image_gallery": gallery, **title_field}), timeout=120)
             r.raise_for_status()
-            print(f"  [{f} -> {serial}] set description + {len(gallery)} resized photos, primary set\n")
+            print(f"  [{f} -> {serial}] set description + {len(gallery)} resized photos, primary set"
+                  f"{', title=' + repr(title) if title else ''}\n")
         except Exception as exc:
             # Don't let one bad photo / transient 5xx abort the whole batch (matches cmd_push).
             print(f"  [{f} -> {serial}] ERROR — {exc} (skipped; may have left partial uploads)\n")
@@ -302,7 +348,8 @@ def cmd_verify(args):
         prim = [r["image"] for r in g if r["is_primary"]]
         s0 = [r["image"] for r in g if r.get("sort_order") == 0]
         ok = prim and s0 and prim[0] == s0[0]
-        print(f"[{serial}] woo#{d.get('woo_product_id')} imgs={len(g)} primary={prim} {'OK' if ok else '*** MISMATCH'}")
+        print(f"[{serial}] woo#{d.get('woo_product_id')} title={d.get('item_name')!r} "
+              f"imgs={len(g)} primary={prim} {'OK' if ok else '*** MISMATCH'}")
 
 
 def cmd_testconn(args):
@@ -325,6 +372,22 @@ def cmd_setprice(args):
     print(f"[{serial}] sell_price set to {args.price}")
 
 
+def cmd_settitle(args):
+    """Set the per-gun WooCommerce title (Serial No.item_name) over REST.
+
+    For a per-serial firearm the Woo product title comes from Serial No.item_name
+    (falling back to the shared Item name), so this overrides the model name with a
+    per-gun title without re-running attach. Re-push the serial for it to take effect."""
+    serial, how = resolve_serial(args.serial, {})
+    if not serial or how == "fuzzy":
+        print(f"[{args.serial}] UNRESOLVED or ambiguous — pass an exact serial"); return
+    print(f"BASE={BASE}")
+    r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+                     data=json.dumps({"item_name": args.title}), timeout=30)
+    r.raise_for_status()
+    print(f"[{serial}] item_name (Woo title) set to {args.title!r}")
+
+
 def main():
     p = argparse.ArgumentParser(description="Attach firearm photos/descriptions and publish to Woo")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -339,9 +402,12 @@ def main():
     sp = sub.add_parser("setprice")
     sp.add_argument("--serial", required=True, help="serial number (or folder name)")
     sp.add_argument("--price", required=True, type=float, help="sell price, e.g. 1234")
+    sp = sub.add_parser("settitle")
+    sp.add_argument("--serial", required=True, help="serial number (or folder name)")
+    sp.add_argument("--title", required=True, help="per-gun Woo listing title (Serial No.item_name)")
     args = p.parse_args()
     {"resolve": cmd_resolve, "attach": cmd_attach, "push": cmd_push, "verify": cmd_verify,
-     "testconn": cmd_testconn, "setprice": cmd_setprice}[args.cmd](args)
+     "testconn": cmd_testconn, "setprice": cmd_setprice, "settitle": cmd_settitle}[args.cmd](args)
 
 
 if __name__ == "__main__":

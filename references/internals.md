@@ -11,6 +11,13 @@ or you need exact field names / code paths.
 - `description` (Text, plain — newlines preserved; Woo renders them as `<br>`)
 - `sell_price` (Currency) — per-serial tag price; `woo_product_id`, `woo_delisted`, `woo_reserved`, `status`
 
+**Serial No `item_name` (the per-gun Woo title)** — a *standard* ERPNext field (not a custom field), `fetch_from: item_code.item_name`, `fetch_if_empty: 1`, `read_only: 1`. Normally it mirrors the parent `Item.item_name` (the shared model name). Writing a per-gun value via REST:
+- **persists** — `fetch_if_empty=1` means the item_name fetch only fires when the field is empty, so a non-empty title we write is never overwritten on later saves (including edits to the parent Item).
+- **is allowed over REST** — `read_only` only disables the Desk form input; `PUT /api/resource/Serial No/<serial>` sets it fine (it's permlevel 0).
+- **survives the Woo write-back** — `push_serial_now` writes `woo_product_id` via `frappe.db.set_value` (a direct DB update, no `doc.save()`), so it never triggers a fetch that could clobber the title.
+
+So `attach` sets it from the description's `Title:` line, and `settitle` sets it standalone. The title takes effect on the next `push` (the payload is rebuilt from the live Serial No each push).
+
 **Item** (`ffl_core` custom fields) also has `image_gallery` + `image` + `description`, but those are for **uniform-price / non-firearm** items. Per-serial firearms (`is_firearm=1`, `uniform_sell_price=0`) keep per-gun data on the Serial No. One Item backs many serials → never put a single gun's photos on the Item.
 
 Find serials for an item: `firearms_in_stock` report or
@@ -33,7 +40,7 @@ the child table. (The doctype name has a space → URL-encode `Serial%20No`.)
 
 - Whitelisted per-serial entrypoint: `ffl_woo_sync.woocommerce.client_api.push_serial_now(serial_no)` → `{"ok":true,"woo_product_id":"<id>","raw":<WC>}`. Idempotent: writes back `woo_product_id`, so re-running updates instead of creating.
 - `client_api.push_item_now(item_code)` (what MCP `woo_push_item` calls) routes per-serial firearms to **all** Active serials of that item_code — too broad for a curated import.
-- Payload builder: `ffl_woo_sync.woocommerce.mapping.serial_to_product_payload` → `status:"publish"`, `regular_price` from `ffl_core.firearm.serial_sell_price` (uniform→Item.standard_rate, else Serial.sell_price; **0 → "0.00"**), SKU `item_code::serial`, stock 1, images from `_resolve_image_list` (is_primary row first = WC featured).
+- Payload builder: `ffl_woo_sync.woocommerce.mapping.serial_to_product_payload` → product `name` from `Serial No.item_name` (falls back to `Item.item_name`, then `item_code`), `status:"publish"`, `regular_price` from `ffl_core.firearm.serial_sell_price` (uniform→Item.standard_rate, else Serial.sell_price; **0 → "0.00"**), SKU `item_code::serial`, stock 1, images from `_resolve_image_list` (is_primary row first = WC featured). The `name`-from-serial rule is the whole reason `attach` writes `item_name`: without a per-gun title every serial of one model lists under the same name. (Uniform-price firearms ignore the serial title — they share one item-level product, so their title always comes from `Item.item_name`.)
 
 ## The 30s sideload timeout (root cause of push failures)
 
