@@ -1,0 +1,9 @@
+# Never commit credentials — the skill reads these from the gunstore-pos repo
+# (mcp/.env) or via the FIREARM_ENV env var, never from this repo.
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
