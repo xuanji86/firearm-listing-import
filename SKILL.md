@@ -1,13 +1,13 @@
 ---
 name: firearm-listing-import
-description: Use when importing per-gun photos + descriptions from local "with pictures" folders (each subfolder named after a firearm serial number, holding a description .txt + photos) onto firearms in the POS, and/or publishing those guns to WooCommerce. Also covers first-time setup (generating the Frappe API key, filling mcp/.env) and post-listing checks on the WooCommerce admin, with a plain-language step-by-step operator guide for non-technical users. Triggers on 把图片/描述更新到枪支, 用 with pictures 文件夹更新枪, 上传序列号图片和描述, 把这些枪 send/推送到 woocommerce/woo 上架, 配置 POS API 密钥上架枪, 带我一步步上架, attach firearm photos by serial, list guns on the store. Photos live on the Serial No (per gun), NOT the Item.
+description: Use when importing per-gun photos + descriptions from local "with pictures" folders (each subfolder named after a firearm serial number, holding a description .txt + photos) onto firearms in the POS, and/or publishing those guns to WooCommerce. Also covers first-time setup (generating the Frappe API key, filling mcp/.env), post-listing checks on the WooCommerce admin, and asking the operator whether to send the New Arrivals email to subscribers after a listing run — with a plain-language step-by-step operator guide for non-technical users. Triggers on 把图片/描述更新到枪支, 用 with pictures 文件夹更新枪, 上传序列号图片和描述, 把这些枪 send/推送到 woocommerce/woo 上架, 配置 POS API 密钥上架枪, 带我一步步上架, 发新品邮件/new arrivals 邮件/通知订阅顾客新品, attach firearm photos by serial, list guns on the store, send the new arrivals email. Photos live on the Serial No (per gun), NOT the Item.
 ---
 
 # Firearm Listing Import（图片+描述 → POS → WooCommerce）
 
 ## Overview
 
-把本地 `with pictures` 文件夹里每把枪的照片和描述，写到 POS 对应的 **Serial No** 记录上，并可选地把每把枪作为独立商品上架到 WooCommerce（oldsteelarsenal.com）。
+把本地 `with pictures` 文件夹里每把枪的照片和描述，写到 POS 对应的 **Serial No** 记录上，并可选地把每把枪作为独立商品上架到 WooCommerce（oldsteelarsenal.com）。上架完成后**问用户要不要给订阅顾客发新品邮件**（见工作流第 5 步）。
 
 文件夹结构：`<root>/<序列号>/` 每个子文件夹名是枪的序列号，里面有 1 个描述 `.txt`（`description.txt` 或编号 txt）和若干照片。`main.*`（或拼错的 `mian.*`）是主图，没有 main 时按文件名排序的第一张为主图。
 
@@ -57,6 +57,7 @@ description: Use when importing per-gun photos + descriptions from local "with p
 | **按序列号上架 Woo** | ✅ `frappe_run_method` 调 `ffl_woo_sync.woocommerce.client_api.push_serial_now(serial_no)`（**别用** `woo_push_item`——它推该 item_code 下全部兄弟序列号） | ✅ `push`（批量包装**同一个** `push_serial_now`，加长超时 + 跳过已上架/未定价） |
 | **传图 + 描述 + 建 gallery** | ❌ 图片字节过不了 MCP（会撑爆上下文） | ✅ `attach`（唯一办法） |
 | 查 Woo 商品 | osa-seo `woocommerce-products-list`（仅装了该 MCP 的端，如 Claude Code） | wp-admin 搜 SKU / `curl` WC REST |
+| **发 New Arrivals 邮件** | ❌ 不在 POS 侧，MCP 都够不着 | ✅ Woo 站上的 `wp osa-growth new-arrivals …`（走 SSH，见 `references/new-arrivals-email.md`） |
 
 **规则**：
 - **按序列号上架** = `push_serial_now`，走 gunstore-pos MCP（`frappe_run_method` 调）**或**
@@ -74,6 +75,9 @@ description: Use when importing per-gun photos + descriptions from local "with p
 3. **canary 优先**：先 `attach`/`push` 一把，`verify` + 用户肉眼确认无误，再批量。
 4. `push` 会让商品以 `status=publish` **立即上架可购买**；价格取 `Serial No.sell_price`，**0 价会以 $0.00 上架**——脚本默认跳过未定价的枪并报告，让用户先定价。
 5. 批量 `attach`/`push` 耗时长（图片上传 + Woo sideload），用 `run_in_background` 跑并记日志。
+6. **新品邮件只在用户明确说"发"之后才发**（第 5 步）。它一次发给上百个订阅者、发出去收不回，
+   而且是在标题/价格/照片最可能还要改的那几分钟里。**没得到明确同意就不许跑 `send`**；
+   用户没提这件事，也要主动问一句——这是上架流程的最后一步，不是可选的礼节。
 
 ## 关键数据模型（务必理解，否则会做错）
 
@@ -133,6 +137,49 @@ uv run scripts/firearm_listings.py verify --root "/path/..." [--only ...]
 ```
 
 打印每个序列号的 gallery 主图是否对齐、`title`（= `Serial No.item_name`，这把枪的 Woo 商品标题）、`woo_product_id`。Woo 端确认（只上架了你处理的序列号、不是全部兄弟；标题/价格/发布状态/featured 图正确、无重复）：登录 wp-admin 搜 SKU `item_code::序列号`，或 `curl` WC REST；Claude Code 也可用 osa-seo MCP `woocommerce-products-list`（`search_sku "<item_code>::"`）。连接/定价/改标题用脚本的 `testconn` / `setprice` / `settitle` 子命令，不必依赖 MCP。
+
+### 5. new arrivals 邮件（**必须问用户，得到同意才发**）
+
+`verify` 通过之后，这批枪已经在店里可买了。**主动问一句**要不要给订阅"新品提醒"的顾客
+发一封 digest——上架流程到这里才算完，别默默结束。
+
+先只读地看一眼，把事实摆给用户，不要凭印象问：
+
+```bash
+ssh oldsteel 'cd ~/domains/oldsteelarsenal.com/public_html && wp osa-growth new-arrivals preview'
+```
+
+它打印这封信会包含哪几件（含顺序、价格、有没有真照片）、标题行、发给多少人。
+然后照这个样子问：
+
+> 刚上架的 6 把已经进了新品邮件队列，这封信会发给 151 个订阅者，标题
+> `6 new arrivals just hit the floor`，按价格从低到高排：<列出来>。
+> **要现在发吗？** 也可以：先发一封到你邮箱看看 / 换个标题 / 这批不发（清队列）。
+
+拿到明确的"发"之后：
+
+```bash
+ssh oldsteel 'cd ~/domains/oldsteelarsenal.com/public_html && wp osa-growth new-arrivals send --yes'
+```
+
+`--yes` 是因为 SSH 里没有交互终端；**它跳过的是插件的确认提示，不是用户的确认**——
+用户那句"发"必须已经拿到手了。
+
+规则：
+
+- **没得到明确同意就不跑 `send`。** 用户说"先看看"、"等下"、"改完标题再说"，就停在这。
+- 用户想先自己看信 → `test --to=<他的邮箱>`（真信，但不动队列、不动统计）。
+- 用户只想发这批里的某几把 → `send --only=CZ85::7408H,M1-30::4711 --yes`（认 SKU）。
+- 用户要自己写标题 → `send --subject="…" --yes`。
+- 用户说这批不值得发（补图、改价、重新上架、测试商品）→ `clear --yes` 把队列清掉，
+  否则这些会混进下一封信。
+- 发完把回显里的 `Sent N, failed N` 如实报给用户；有 `failed` 或"N product(s) stay
+  queued"就一并说明。
+
+一封信最多 8 件，其余留在队列里等下一封——所以一次上架 20 把时，要告诉用户"这封发 8
+件，剩下 12 件还在队列里，可以再发一次"。
+
+完整命令、坑、以及没有 SSH 权限时怎么办，见 `references/new-arrivals-email.md`。
 
 ## 为什么 resize（被坑过的点）
 

@@ -17,7 +17,8 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 |---|---|
 | `SKILL.md` | The runbook the agent reads (data model, safety, workflow). |
 | `scripts/firearm_listings.py` | Portable Frappe‑REST tool: `resolve` / `attach` / `push` / `verify` / `testconn` / `setprice`. |
-| `references/operator-guide.md` | Plain‑language, step‑by‑step guide for non‑technical operators (API key → folders → pricing → run → WooCommerce checks). |
+| `references/operator-guide.md` | Plain‑language, step‑by‑step guide for non‑technical operators (API key → folders → pricing → run → WooCommerce checks → the new‑arrivals email). |
+| `references/new-arrivals-email.md` | The post‑listing New Arrivals email: what to ask, and the `wp osa-growth new-arrivals` commands behind it. |
 | `references/internals.md` | Field names, code paths, gotchas. |
 
 ## How it works (the short version)
@@ -28,6 +29,7 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 - Photos are **resized (~2000px/q80) before upload** — full‑size phone photos blow past the POS→Woo 30s image‑sideload timeout.
 - Woo listing is **per serial** via `push_serial_now` (not `woo_push_item`, which would push every sibling under the same Item).
 - Image bytes go over Frappe REST `upload_file` from the script (they can't pass through MCP tool calls without exploding the agent's context).
+- After the guns are live, the skill **asks whether to email the New Arrivals subscribers** and, only on an explicit yes, runs `wp osa-growth new-arrivals send` on the store host. Nothing is sent automatically — a timer used to fire an hour after the first listing, which is exactly when titles, prices and photos are still being corrected.
 
 ## Install
 
@@ -58,6 +60,7 @@ uv run scripts/firearm_listings.py resolve --root "/path/to/with pictures N"
 ## Safety
 
 - `attach` / `push` / `setprice` are **live writes** to a real POS + WooCommerce store. The tool prints the target before writing, refuses fuzzy serial matches, and the runbook mandates **resolve‑first + canary** (do one, verify, then batch).
+- The New Arrivals email reaches every subscriber at once and cannot be recalled. The runbook forbids `send` without an explicit yes from the operator, and puts `preview` (read‑only) and `test --to=` (one address, no state touched) in front of it.
 - **No secrets in this repo** — credentials live only in your `mcp/.env` (or `FIREARM_ENV`). The operator guide shows placeholders only.
 
 > Note: the "平台兼容（已配好/已做好）" lines in `SKILL.md` describe the original gunstore‑pos
