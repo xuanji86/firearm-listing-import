@@ -202,7 +202,8 @@ GunBroker 是拍卖行式的枪械交易网站，是**网店之外的第二个�
 
 **唯一的判定标准：你有没有亲眼确认那条 listing 已经不在 GunBroker 上了。**
 在确认之前，这把枪都还可能被网上的买家买走。下面三种回话都算**没结束**，
-处理方式完全一样——**登录 GunBroker 网站，自己把那条 listing 结束掉**：
+处理方式完全一样——**登录 GunBroker 网站，在那条 listing 上点 "End Item Early"
+（提前结束）**：
 
 | AI 助手说 | 什么意思 |
 |---|---|
@@ -213,8 +214,9 @@ GunBroker 是拍卖行式的枪械交易网站，是**网店之外的第二个�
 **别等它说 "pending_manual" 才动手。** 只有在它明确说结束成功、并且你在 GunBroker 上
 翻不到那条 listing 了，这件事才算完。
 
-> **给部署的人**：`gb_push_serial`（上架）和 `gb_end_listing`（结束）是**同一个开关**
-> 控制的——启动 MCP 时要设 `GUNSTORE_MCP_GUNBROKER_ACTIONS=1`，两个才都在。
+> **给部署的人（这是硬性前置，不是建议）**：`gb_push_serial`（上架）和
+> `gb_end_listing`（结束）是**同一个开关**控制的——启动 MCP 时**必须**设
+> `GUNSTORE_MCP_GUNBROKER_ACTIONS=1`，两个才都在。
 > **不要只想着开上架**：能上架却不能结束的机器，正好卡在最危险的那个位置上。
 
 **这一条是整份文档里最要紧的：** 枪已经卖给柜台的顾客了，GunBroker 上还挂着，
@@ -273,7 +275,7 @@ GunBroker 是拍卖行式的枪械交易网站，是**网店之外的第二个�
 | 想挂到 GunBroker（试运行） | "用 GunBroker 通道上架序列号 X"（先一把，看过真实页面再继续） |
 | AI 说 GunBroker 那条 "REFUSED" | 护栏在起作用，**别绕**——目前该渠道只对测试站开放 |
 | AI 提到 "pending_manual" / "还能被买走" | 立刻登录 GunBroker 手动结束那条 listing（防止一枪两卖） |
-| AI 说"没有 `gb_end_listing` 这个工具" | 一样：**自己登录 GunBroker 结束那条 listing**；顺便告诉部署的人要开 `GUNSTORE_MCP_GUNBROKER_ACTIONS=1` |
+| AI 说"没有 `gb_end_listing` 这个工具" | 一样：**自己登录 GunBroker，在那条 listing 上点 "End Item Early"**；顺便告诉部署的人要开 `GUNSTORE_MCP_GUNBROKER_ACTIONS=1` |
 | 临时下架 | （去 wp-admin 把 Status 改 Draft；或让 AI 助手 delist） |
 | 想发新品邮件 | "给订阅的顾客发一封新品邮件" |
 | 想先看看信长什么样 | "先发一封新品邮件到我邮箱" |
