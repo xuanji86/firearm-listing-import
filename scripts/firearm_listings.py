@@ -16,11 +16,13 @@ Subcommands (run `resolve` first — it is read-only):
       title, taken from the description's "Title:" line). Skips serials that
       already have a gallery unless --force. Resizing is mandatory (see push
       timeout note below).
-  push    --root DIR [--map map.json] [--only A,B]
-      Publish each priced + Active + not-yet-listed serial as its own WC product
-      via the whitelisted push_serial_now. Skips un-priced ($0) and already-listed.
-  verify  --root DIR [--map map.json] [--only A,B]
-      Show gallery primary integrity + woo_product_id for each serial.
+  push    --root DIR [--map map.json] [--only A,B] [--channel woo|gunbroker]
+      Publish each priced + Active + not-yet-listed serial as its own listing
+      via the channel's whitelisted push_serial_now. Skips un-priced ($0) and
+      already-listed. --channel gunbroker is refused against a non-local POS
+      unless FIREARM_ALLOW_PROD=1 (see "the production gate" below).
+  verify  --root DIR [--map map.json] [--only A,B] [--channel woo|gunbroker]
+      Show gallery primary integrity + that channel's listing id per serial.
   testconn
       Connectivity + auth check against the POS (use instead of any MCP
       "test connection" tool — works on any agent via the shell).
@@ -36,6 +38,14 @@ differs from the Serial No record (case/prefix/typo, or a corrected serial).
 Credentials + target site come from mcp/.env (FRAPPE_BASE_URL/API_KEY/API_SECRET).
 NOTE: that .env points at PRODUCTION. attach/push are live writes.
 
+Channels: `push`/`verify` take --channel woo (default) or gunbroker. Both call a
+whitelisted method on the POS, which owns the credentials — and for GunBroker
+owns the sandbox-vs-live choice too (GunBroker Settings.sandbox_mode). This
+script cannot select an environment; pointing it at dev.localhost is how you
+rehearse. GunBroker pushes against a non-local site are refused unless
+FIREARM_ALLOW_PROD=1 is set explicitly: a stray Woo push can be unpublished, a
+stray GunBroker listing can be bought.
+
 Portable by design: pure Python + Frappe REST, no agent-specific tools — runs the
 same under Claude Code or Codex. Run with `uv run` (auto-installs the one dep via
 the inline metadata below) or the repo venv `mcp/.venv/bin/python`; a bare
@@ -47,7 +57,7 @@ the inline metadata below) or the repo venv `mcp/.venv/bin/python`; a bare
 # ///
 from __future__ import annotations
 import argparse, json, os, re, subprocess
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import requests
 
 def _find_env():
@@ -73,7 +83,21 @@ def _find_env():
 ENV = _find_env()
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 MAXPX, QUALITY = 2000, 80          # resize target: long edge px, JPEG quality
-PUSH_METHOD = "ffl_woo_sync.woocommerce.client_api.push_serial_now"
+# Sales channels `push`/`verify` can drive. Each is (whitelisted POS method,
+# the Serial No field holding that channel's listing id, HTTP timeout seconds).
+# Both go through the POS: it owns the credentials and, for GunBroker, the
+# sandbox-vs-live choice (`GunBroker Settings.sandbox_mode`). This script never
+# talks to WooCommerce or GunBroker directly.
+PUSH_CHANNELS = {
+    "woo": ("ffl_woo_sync.woocommerce.client_api.push_serial_now",
+            "woo_product_id", 240),
+    "gunbroker": ("ffl_integrations.gunbroker.client_api.push_serial_now",
+                  "gb_item_id", 180),
+}
+DEFAULT_CHANNEL = "woo"
+# Opt-in required to push to GunBroker from a non-local site. Exactly "1" —
+# anything else is a no, so a typo fails closed.
+ALLOW_PROD_ENV = "FIREARM_ALLOW_PROD"
 # Per-gun WooCommerce title: a "Title: ..." line in the description .txt (colon may
 # have no following space; matched anywhere, line-anchored, case-insensitive).
 TITLE_RE = re.compile(r"\s*title\s*:\s*(.+?)\s*$", re.I)
@@ -93,6 +117,54 @@ def load_cfg():
 CFG = load_cfg()
 BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
 H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
+
+
+# --- the production gate ---------------------------------------------------
+
+def _is_local_base(url):
+    """True only for a POS running on this machine.
+
+    Compares the parsed hostname, never a substring of the URL: `in` would let
+    `dev.localhost.example.com` read as local. `.localhost` is a reserved TLD
+    (RFC 6761) and cannot be registered, so the suffix is safe to trust."""
+    host = (urlparse(url).hostname or "").lower()
+    return (host in ("localhost", "127.0.0.1", "::1")
+            or host.endswith(".localhost"))
+
+
+def _prod_gate_blocks(channel):
+    """Refuse a GunBroker push against a non-local POS unless told otherwise.
+
+    mcp/.env points at PRODUCTION, and this script is normally driven by an
+    agent working through a folder of guns. On Woo a mistaken push publishes a
+    product that can be unpublished; on GunBroker it puts a firearm up for sale
+    on a public marketplace where a buyer can commit before anyone notices, and
+    ending a listing early is a manual chore on GunBroker's own site. So the
+    GunBroker channel is local-only until a person says otherwise out loud.
+
+    Returns True (and explains itself) when the push must not happen."""
+    if channel != "gunbroker" or _is_local_base(BASE):
+        return False
+    if os.environ.get(ALLOW_PROD_ENV) == "1":
+        print(f"!! {ALLOW_PROD_ENV}=1 — pushing to GunBroker via {BASE}.\n"
+              "   These are real listings on the live marketplace.\n")
+        return False
+    print(f"REFUSED — push --channel gunbroker against {BASE}\n"
+          f"\n"
+          f"  That site is not local, so this would list real firearms on the\n"
+          f"  live GunBroker marketplace. Sandbox vs live is decided by\n"
+          f"  GunBroker Settings.sandbox_mode on the POS, not by this script,\n"
+          f"  so pointing at production is the whole risk.\n"
+          f"\n"
+          f"  Point mcp/.env (or FIREARM_ENV) at the dev site to rehearse:\n"
+          f"      http://dev.localhost:8000\n"
+          f"\n"
+          f"  If you really mean production, say so explicitly:\n"
+          f"      {ALLOW_PROD_ENV}=1 uv run scripts/firearm_listings.py push \\\n"
+          f"          --channel gunbroker --root ... --only ONE_SERIAL\n"
+          f"\n"
+          f"  Ask the user first, and go one gun at a time.")
+    return True
 
 
 # --- helpers ---------------------------------------------------------------
@@ -310,8 +382,13 @@ def cmd_attach(args):
 
 
 def cmd_push(args):
+    channel = getattr(args, "channel", DEFAULT_CHANNEL)
+    if _prod_gate_blocks(channel):
+        return
+    method, id_field, timeout = PUSH_CHANNELS[channel]
     ov = json.load(open(args.map)) if args.map else {}
-    print(f"BASE={BASE}  (publishes LIVE products)\n")
+    where = "local" if _is_local_base(BASE) else "LIVE"
+    print(f"BASE={BASE}  channel={channel}  (publishes {where} listings)\n")
     for f in targets(args):
         serial, how = resolve_serial(f, ov)
         if not serial:
@@ -323,21 +400,30 @@ def cmd_push(args):
             print(f"[{serial}] SKIP — status={d.get('status')}"); continue
         if not (d.get("sell_price") or 0):
             print(f"[{serial}] SKIP — unpriced ($0); set sell_price first"); continue
-        if d.get("woo_product_id"):
-            print(f"[{serial}] SKIP — already listed (woo#{d['woo_product_id']})"); continue
+        if d.get(id_field):
+            print(f"[{serial}] SKIP — already listed ({id_field}={d[id_field]})"); continue
         try:
-            r = requests.post(f"{BASE}/api/method/{PUSH_METHOD}",
+            r = requests.post(f"{BASE}/api/method/{method}",
                               headers={**H, "Content-Type": "application/json"},
-                              data=json.dumps({"serial_no": serial}), timeout=240)
+                              data=json.dumps({"serial_no": serial}), timeout=timeout)
             if not r.ok:
                 print(f"[{serial}] HTTP {r.status_code} {r.text[:200]}"); continue
-            m = r.json().get("message", {})
-            print(f"[{serial}] ok={m.get('ok')} woo_product_id={m.get('woo_product_id')}")
+            m = r.json().get("message") or {}
+            # A guard refusal is a normal answer, not an error: the POS returns
+            # {"ok": false, "skipped": ..., "message": ...} rather than throwing,
+            # so the reason survives. Print the reason — re-running won't change it.
+            if m.get("skipped"):
+                print(f"[{serial}] SKIP — {m['skipped']}: {m.get('message', '')}"); continue
+            print(f"[{serial}] ok={m.get('ok')} {id_field}={m.get(id_field)}")
+            for w in (m.get("warnings") or []):
+                print(f"[{serial}]   warning: {w}")
         except Exception as exc:
             print(f"[{serial}] EXC {exc}")
 
 
 def cmd_verify(args):
+    channel = getattr(args, "channel", DEFAULT_CHANNEL)
+    _, id_field, _ = PUSH_CHANNELS[channel]
     ov = json.load(open(args.map)) if args.map else {}
     for f in targets(args):
         serial, _ = resolve_serial(f, ov)
@@ -348,7 +434,7 @@ def cmd_verify(args):
         prim = [r["image"] for r in g if r["is_primary"]]
         s0 = [r["image"] for r in g if r.get("sort_order") == 0]
         ok = prim and s0 and prim[0] == s0[0]
-        print(f"[{serial}] woo#{d.get('woo_product_id')} title={d.get('item_name')!r} "
+        print(f"[{serial}] {id_field}={d.get(id_field)} title={d.get('item_name')!r} "
               f"imgs={len(g)} primary={prim} {'OK' if ok else '*** MISMATCH'}")
 
 
@@ -398,6 +484,11 @@ def main():
         sp.add_argument("--only", help="comma-separated folder names to limit to")
         if name == "attach":
             sp.add_argument("--force", action="store_true", help="re-attach even if gallery exists")
+        if name in ("push", "verify"):
+            sp.add_argument("--channel", choices=sorted(PUSH_CHANNELS),
+                            default=DEFAULT_CHANNEL,
+                            help=f"sales channel (default: {DEFAULT_CHANNEL}). "
+                                 f"gunbroker needs {ALLOW_PROD_ENV}=1 off a local site")
     sub.add_parser("testconn")  # bare connectivity/auth check
     sp = sub.add_parser("setprice")
     sp.add_argument("--serial", required=True, help="serial number (or folder name)")
