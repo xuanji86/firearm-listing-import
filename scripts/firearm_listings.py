@@ -125,9 +125,17 @@ def _is_local_base(url):
     """True only for a POS running on this machine.
 
     Compares the parsed hostname, never a substring of the URL: `in` would let
-    `dev.localhost.example.com` read as local. `.localhost` is a reserved TLD
-    (RFC 6761) and cannot be registered, so the suffix is safe to trust."""
-    host = (urlparse(url).hostname or "").lower()
+    `dev.localhost.example.com` read as local, and it would also be fooled by
+    userinfo (`http://localhost@evil.example.com/` — the real host is
+    evil.example.com). `.localhost` is a reserved TLD (RFC 6761) and cannot be
+    registered, so the suffix is safe to trust.
+
+    A URL we cannot parse a hostname out of returns False, i.e. it is treated
+    as production. Fail closed: the cost of being wrong in the other direction
+    is a real gun on a real marketplace."""
+    # rstrip("."): "dev.localhost." is the fully-qualified spelling of the same
+    # host, so refusing it would be a false alarm, not extra safety.
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
     return (host in ("localhost", "127.0.0.1", "::1")
             or host.endswith(".localhost"))
 
@@ -387,8 +395,19 @@ def cmd_push(args):
         return
     method, id_field, timeout = PUSH_CHANNELS[channel]
     ov = json.load(open(args.map)) if args.map else {}
-    where = "local" if _is_local_base(BASE) else "LIVE"
-    print(f"BASE={BASE}  channel={channel}  (publishes {where} listings)\n")
+    print(f"BASE={BASE}  channel={channel}")
+    if channel == "gunbroker":
+        # Deliberately NOT "local" vs "LIVE". A local dev site holding
+        # production credentials lists real guns: sandbox vs live is
+        # GunBroker Settings.sandbox_mode on the POS, which this script can
+        # neither read nor set. The refusal path already says so; saying
+        # something friendlier here would contradict it.
+        print("   Sandbox or live is decided by GunBroker Settings.sandbox_mode\n"
+              "   on the POS — not by this script, and not by the URL above.\n"
+              "   Check the `sandbox` field from gb_test_connection first.\n")
+    else:
+        where = "local" if _is_local_base(BASE) else "LIVE"
+        print(f"   (publishes {where} products)\n")
     for f in targets(args):
         serial, how = resolve_serial(f, ov)
         if not serial:
@@ -419,6 +438,15 @@ def cmd_push(args):
                 print(f"[{serial}]   warning: {w}")
         except Exception as exc:
             print(f"[{serial}] EXC {exc}")
+            if channel == "gunbroker":
+                # POST /Items is not idempotent and is never auto-retried
+                # (spec §4.12). A read timeout most often means the listing WAS
+                # created and the answer got lost, so "just run it again" — the
+                # obvious reaction — is the one reaction that double-lists.
+                print(f"[{serial}]   ^ the listing may already exist on GunBroker. "
+                      f"Do NOT re-push:\n"
+                      f"[{serial}]     check gb_listing_status first, or let the "
+                      f"hourly sweep claim it by SKU.")
 
 
 def cmd_verify(args):
