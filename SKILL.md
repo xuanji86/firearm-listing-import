@@ -189,6 +189,12 @@ FIREARM_ALLOW_PROD=1 uv run scripts/firearm_listings.py push \
 合入之前：**一把枪在柜台卖掉，就得有人手动 `gb_end_listing`**，否则它在 GunBroker 上
 还挂着，可能被再卖一次。这条上线后本段会改回"正常不用管"。
 
+⚠️ **`gb_push_serial` 和 `gb_end_listing` 是同一个开关**：MCP 要设
+`GUNSTORE_MCP_GUNBROKER_ACTIONS=1` 才注册这两个写工具（`gb_test_connection` /
+`gb_listing_status` 不受影响，永远在）。没设的实例上助手会回"没有这个工具"——
+**那不是"不用结束"**，是这台机器结束不了，得有人去 GunBroker 站点手动结束。
+配这台机器的时候别只开上架：**能上架却不能结束，正好卡在最危险的位置上。**
+
 **跳过原因照实读**：守卫拒绝返回 `{"ok": false, "skipped": ..., "message": ...}`，
 脚本原样打印。常见的有未定价、非 Active、已上架、被另一个渠道预留（那把枪 Woo
 上有人下单了）。重试不会变，按 message 处理。
