@@ -155,6 +155,16 @@ class ProdGate(unittest.TestCase):
         blocked, _ = self._blocks(self.PROD, "woo")
         self.assertFalse(blocked)
 
+    def test_an_unreadable_base_is_treated_as_production(self):
+        """Fail-closed at the GATE, not just in _is_local_base. If BASE is
+        malformed we cannot prove it is local, and "we could not tell" must
+        never resolve to "go ahead" for this particular action."""
+        for base in ("", "dev.localhost:8000", "://///", "not a url at all"):
+            with self.subTest(base=base):
+                blocked, out = self._blocks(base, "gunbroker")
+                self.assertTrue(blocked, f"{base!r} was allowed through")
+                self.assertIn("REFUSED", out)
+
     def test_the_substring_lookalike_is_refused(self):
         blocked, _ = self._blocks("https://dev.localhost.evil.example.com", "gunbroker")
         self.assertTrue(blocked)

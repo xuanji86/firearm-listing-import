@@ -69,6 +69,23 @@ description: Use when importing per-gun photos + descriptions from local "with p
 - Codex 端：读文件用 `shell`（`cat`/`grep`），改文件用 `apply_patch`，跑脚本/`curl` 用
   `shell`，记进度用 `update_plan`。
 
+## 开发（改这个脚本的人看）
+
+`push --channel gunbroker` 的 prod 硬闸有回归测试。**stdlib `unittest`,零依赖零安装**,
+不需要 `uv`,也永远不发 HTTP 请求（`requests` 在测试里被打桩,真发请求会直接失败）：
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+覆盖：非本地 BASE 且未设 `FIREARM_ALLOW_PROD` → 拒绝；判不出是否本地（BASE 畸形/无
+scheme）→ 按 prod 处理（fail-closed）；`FIREARM_ALLOW_PROD=1` → 放行；子串冒充
+（`dev.localhost.evil.example.com`）、userinfo（`http://localhost@evil.example.com/`）、
+`[::1]`、尾点 FQDN、大写；以及 `PUSH_CHANNELS` 两个渠道不共用 id 字段。
+
+**改 `cmd_push` / `_is_local_base` / `_prod_gate_blocks` 之前先跑一遍,改完再跑一遍。**
+这道闸是"agent 拿着一整个文件夹的枪在跑批"与"真枪上公开拍卖行"之间唯一的东西。
+
 ## ⚠️ 安全护栏
 
 1. **`mcp/.env` 指向 PROD**（`https://pos.oldsteelarsenal.com`），Woo 是真实线上店。`attach`/`push` 都是线上写操作、面向顾客、难以撤销。
