@@ -166,7 +166,11 @@ FIREARM_ALLOW_PROD=1 uv run scripts/firearm_listings.py push \
 **结束 listing 不走这个脚本**：用 MCP `gb_end_listing(serial_no, confirm=true)`。
 **看返回里的 `confirmed` 而不是 `ok`**——`confirmed=false` 一定带 `pending_manual`
 和 `gb_url`，意思是这把枪在 GunBroker 上**还能被买走**，得有人去站点上手动结束。
-枪在柜台卖掉时 POS 会自己去结束 GunBroker 的 listing（防双卖），正常不用手动碰。
+
+⚠️ **柜台卖掉自动结束 GB listing 的那条链路目前还没上线**（`serial_channel_exit` hook
+在 PR-1 里不存在，`end_listing` 眼下唯一的调用方就是上面这个手动方法）。在 PR-2/PR-3
+合入之前：**一把枪在柜台卖掉，就得有人手动 `gb_end_listing`**，否则它在 GunBroker 上
+还挂着，可能被再卖一次。这条上线后本段会改回"正常不用管"。
 
 **跳过原因照实读**：守卫拒绝返回 `{"ok": false, "skipped": ..., "message": ...}`，
 脚本原样打印。常见的有未定价、非 Active、已上架、被另一个渠道预留（那把枪 Woo
