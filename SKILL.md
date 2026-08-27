@@ -55,7 +55,8 @@ description: Use when importing per-gun photos + descriptions from local "with p
 | 定价（`sell_price`） | `frappe_update_document` | `setprice` |
 | 设每把枪 Woo 标题（`item_name`） | `set_serial_title` / `frappe_update_document` | `settitle`（或 `attach` 从 `Title:` 行自动写） |
 | **按序列号上架 Woo** | ✅ `frappe_run_method` 调 `ffl_woo_sync.woocommerce.client_api.push_serial_now(serial_no)`（**别用** `woo_push_item`——它推该 item_code 下全部兄弟序列号） | ✅ `push`（批量包装**同一个** `push_serial_now`，加长超时 + 跳过已上架/未定价） |
-| **传图 + 描述 + 建 gallery** | ❌ 图片字节过不了 MCP（会撑爆上下文） | ✅ `attach`（唯一办法） |
+| **按序列号上架 GunBroker** | ✅ `gb_push_serial(serial_no, confirm=true)`（单把；`gb_listing_status` 查状态、`gb_end_listing` 结束） | ✅ `push --channel gunbroker`（批量；**非本地站点须 `FIREARM_ALLOW_PROD=1`**，见下） |
+| **传图 + 描述 + 建 gallery** | ❌ 图片字节过不了 MCP（会撑爆上下文） | ✅ `attach`（唯一办法，两个渠道共用同一份图和描述） |
 | 查 Woo 商品 | osa-seo `woocommerce-products-list`（仅装了该 MCP 的端，如 Claude Code） | wp-admin 搜 SKU / `curl` WC REST |
 | **发 New Arrivals 邮件** | ❌ 不在 POS 侧，MCP 都够不着 | ✅ Woo 站上的 `wp osa-growth new-arrivals …`（走 SSH，见 `references/new-arrivals-email.md`） |
 
@@ -68,6 +69,23 @@ description: Use when importing per-gun photos + descriptions from local "with p
 - Codex 端：读文件用 `shell`（`cat`/`grep`），改文件用 `apply_patch`，跑脚本/`curl` 用
   `shell`，记进度用 `update_plan`。
 
+## 开发（改这个脚本的人看）
+
+`push --channel gunbroker` 的 prod 硬闸有回归测试。**stdlib `unittest`,零依赖零安装**,
+不需要 `uv`,也永远不发 HTTP 请求（`requests` 在测试里被打桩,真发请求会直接失败）：
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+覆盖：非本地 BASE 且未设 `FIREARM_ALLOW_PROD` → 拒绝；判不出是否本地（BASE 畸形/无
+scheme）→ 按 prod 处理（fail-closed）；`FIREARM_ALLOW_PROD=1` → 放行；子串冒充
+（`dev.localhost.evil.example.com`）、userinfo（`http://localhost@evil.example.com/`）、
+`[::1]`、尾点 FQDN、大写；以及 `PUSH_CHANNELS` 两个渠道不共用 id 字段。
+
+**改 `cmd_push` / `_is_local_base` / `_prod_gate_blocks` 之前先跑一遍,改完再跑一遍。**
+这道闸是"agent 拿着一整个文件夹的枪在跑批"与"真枪上公开拍卖行"之间唯一的东西。
+
 ## ⚠️ 安全护栏
 
 1. **`mcp/.env` 指向 PROD**（`https://pos.oldsteelarsenal.com`），Woo 是真实线上店。`attach`/`push` 都是线上写操作、面向顾客、难以撤销。
@@ -75,7 +93,12 @@ description: Use when importing per-gun photos + descriptions from local "with p
 3. **canary 优先**：先 `attach`/`push` 一把，`verify` + 用户肉眼确认无误，再批量。
 4. `push` 会让商品以 `status=publish` **立即上架可购买**；价格取 `Serial No.sell_price`，**0 价会以 $0.00 上架**——脚本默认跳过未定价的枪并报告，让用户先定价。
 5. 批量 `attach`/`push` 耗时长（图片上传 + Woo sideload），用 `run_in_background` 跑并记日志。
-6. **新品邮件只在用户明确说"发"之后才发**（第 5 步）。它一次发给上百个订阅者、发出去收不回，
+6. **GunBroker 通道一期只对本地站验证**。`push --channel gunbroker` 打非本地站点会**直接拒绝**，
+   除非显式 `FIREARM_ALLOW_PROD=1`。原因不是形式主义：Woo 推错了能取消发布，GunBroker
+   推错了是把一把真枪挂上公开拍卖行，买家可以在任何人发现之前拍下，而提前结束 listing
+   要人去 GunBroker 站点上手动做。**沙盒还是生产由 POS 的 `GunBroker Settings.sandbox_mode`
+   决定，脚本和 MCP 都选不了**——把 `mcp/.env` 指向 `http://dev.localhost:8000` 才是演练的办法。
+7. **新品邮件只在用户明确说"发"之后才发**（第 5 步）。它一次发给上百个订阅者、发出去收不回，
    而且是在标题/价格/照片最可能还要改的那几分钟里。**没得到明确同意就不许跑 `send`**；
    用户没提这件事，也要主动问一句——这是上架流程的最后一步，不是可选的礼节。
 
@@ -130,13 +153,61 @@ uv run scripts/firearm_listings.py push --root "/path/..." [--map map.json] [--o
 - 商品 `status=publish` 立即上线；价格、库存(1)、描述、resize 后的图（主图为 featured）、category、attributes 都会带上。
 - 同样 canary 优先。批量用脚本后台跑（图大时 MCP 30s 可能超时，脚本用长超时）。
 
+### 3b. push --channel gunbroker（上架 GunBroker，按序列号）
+
+```bash
+# 演练：把 mcp/.env（或 FIREARM_ENV）指向本地 dev 站
+uv run scripts/firearm_listings.py push --channel gunbroker --root "/path/..." --only ONE_SERIAL
+```
+
+GunBroker 是第三销售渠道，和 Woo 并列：固定价 Buy Now，价取同一个
+`Serial No.sell_price`，图和描述就是 `attach` 已经写好的那份（不用重传）。上架成功
+写 `Serial No.gb_item_id`，脚本据此跳过已上架的枪——和 Woo 用 `woo_product_id`
+是同一套幂等逻辑。
+
+**开工前先看清楚打的是哪个 GunBroker。** 沙盒还是生产由 POS 的
+`GunBroker Settings.sandbox_mode` 唯一决定，脚本这边没有开关。用 MCP 的
+`gb_test_connection` 看回包里的 `sandbox` 字段确认一次，再开始。
+
+**非本地站点会被拒绝**：见"安全护栏"第 6 条。真要打生产必须问过用户，
+`FIREARM_ALLOW_PROD=1` 显式开，并且**先 canary 一把**：
+
+```bash
+FIREARM_ALLOW_PROD=1 uv run scripts/firearm_listings.py push \
+    --channel gunbroker --root "/path/..." --only ONE_SERIAL
+```
+
+推完立刻核对：脚本打印的 `gb_item_id`，或 `verify --channel gunbroker`；把
+`gb_url`/item id 给用户看一眼真实 listing 长什么样，再决定要不要批量。
+
+**结束 listing 不走这个脚本**：用 MCP `gb_end_listing(serial_no, confirm=true)`。
+**看返回里的 `confirmed` 而不是 `ok`**——`confirmed=false` 一定带 `pending_manual`
+和 `gb_url`，意思是这把枪在 GunBroker 上**还能被买走**，得有人去站点上手动结束。
+
+⚠️ **柜台卖掉自动结束 GB listing 的那条链路目前还没上线**（`serial_channel_exit` hook
+在 PR-1 里不存在，`end_listing` 眼下唯一的调用方就是上面这个手动方法）。在 PR-2/PR-3
+合入之前：**一把枪在柜台卖掉，就得有人手动 `gb_end_listing`**，否则它在 GunBroker 上
+还挂着，可能被再卖一次。这条上线后本段会改回"正常不用管"。
+
+⚠️ **`GUNSTORE_MCP_GUNBROKER_ACTIONS=1` 是部署前置**（lead 裁决，已进 G5 部署清单）。
+`gb_push_serial` 和 `gb_end_listing` **是同一个开关**：不设这个变量，MCP 就不注册这两个写工具
+（`gb_test_connection` / `gb_listing_status` 不受影响，永远在）。没设的实例上助手会回
+"没有这个工具"——**那不是"不用结束"**，是这台机器结束不了，得有人去 GunBroker 站点
+手动 **End Item Early**。配机器时别只想着开上架：**能上架却不能结束，正好卡在最危险的
+位置上。**
+
+**跳过原因照实读**：守卫拒绝返回 `{"ok": false, "skipped": ..., "message": ...}`，
+脚本原样打印。常见的有未定价、非 Active、已上架、被另一个渠道预留（那把枪 Woo
+上有人下单了）。重试不会变，按 message 处理。
+
 ### 4. verify（核对）
 
 ```bash
-uv run scripts/firearm_listings.py verify --root "/path/..." [--only ...]
+uv run scripts/firearm_listings.py verify --root "/path/..." [--only ...] [--channel woo|gunbroker]
 ```
 
-打印每个序列号的 gallery 主图是否对齐、`title`（= `Serial No.item_name`，这把枪的 Woo 商品标题）、`woo_product_id`。Woo 端确认（只上架了你处理的序列号、不是全部兄弟；标题/价格/发布状态/featured 图正确、无重复）：登录 wp-admin 搜 SKU `item_code::序列号`，或 `curl` WC REST；Claude Code 也可用 osa-seo MCP `woocommerce-products-list`（`search_sku "<item_code>::"`）。连接/定价/改标题用脚本的 `testconn` / `setprice` / `settitle` 子命令，不必依赖 MCP。
+打印每个序列号的 gallery 主图是否对齐、`title`（= `Serial No.item_name`，这把枪的 Woo 商品标题）、
+以及该渠道的 listing id（默认 `woo_product_id`；加 `--channel gunbroker` 则看 `gb_item_id`）。Woo 端确认（只上架了你处理的序列号、不是全部兄弟；标题/价格/发布状态/featured 图正确、无重复）：登录 wp-admin 搜 SKU `item_code::序列号`，或 `curl` WC REST；Claude Code 也可用 osa-seo MCP `woocommerce-products-list`（`search_sku "<item_code>::"`）。连接/定价/改标题用脚本的 `testconn` / `setprice` / `settitle` 子命令，不必依赖 MCP。
 
 ### 5. new arrivals 邮件（**必须问用户，得到同意才发**）
 

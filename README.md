@@ -57,10 +57,22 @@ uv run scripts/firearm_listings.py testconn
 uv run scripts/firearm_listings.py resolve --root "/path/to/with pictures N"
 ```
 
+## Tests
+
+The production gate on `push --channel gunbroker` (see Safety below) has a
+regression suite. Stdlib only — no install, no `uv` needed, and it never makes
+an HTTP request:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 ## Safety
 
 - `attach` / `push` / `setprice` are **live writes** to a real POS + WooCommerce store. The tool prints the target before writing, refuses fuzzy serial matches, and the runbook mandates **resolve‑first + canary** (do one, verify, then batch).
 - The New Arrivals email reaches every subscriber at once and cannot be recalled. The runbook forbids `send` without an explicit yes from the operator, and puts `preview` (read‑only) and `test --to=` (one address, no state touched) in front of it.
+- **`push --channel gunbroker` is refused against any non-local POS** unless `FIREARM_ALLOW_PROD=1` is set explicitly (exactly `1`; a typo fails closed). A mistaken Woo push can be unpublished — a mistaken GunBroker push puts a real firearm on a public marketplace where a buyer can commit before anyone notices. Note this gate keys on *locality*, not on sandbox-vs-live: which GunBroker gets contacted is `GunBroker Settings.sandbox_mode` on the POS, which this script can neither read nor set.
+- **The GunBroker MCP tools are a deployment prerequisite, not an option.** Any POS MCP instance that will list or end GunBroker listings must be started with `GUNSTORE_MCP_GUNBROKER_ACTIONS=1` — `gb_push_serial` and `gb_end_listing` are not registered without it (`gb_test_connection` / `gb_listing_status` always are). **Push and end are the same switch.** An instance that can list but not end is parked on the worst square: a gun sells at the counter, the assistant answers "I don't have that tool", and the listing stays up for a second buyer. Automatic delisting on a counter sale does not exist yet — it lands with PR-2/PR-3.
 - **No secrets in this repo** — credentials live only in your `mcp/.env` (or `FIREARM_ENV`). The operator guide shows placeholders only.
 
 > Note: the "平台兼容（已配好/已做好）" lines in `SKILL.md` describe the original gunstore‑pos
