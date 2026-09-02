@@ -22,11 +22,16 @@ description: Use when importing per-gun photos + descriptions from local "with p
 > 一段带着做，并**代替用户执行命令**（从生成 API key、整理文件夹、定价，到在
 > WooCommerce 后台检查/下架）。每步用大白话汇报结果再问是否继续，别甩命令让他自己跑。
 
-## 平台兼容（Claude Code / Codex）
+## 平台兼容（Claude Code / Codex；Windows / Linux / macOS）
 
 本 skill 在 Claude Code 和 Codex 上行为一致。两条路并存：**gunstore-pos MCP**（读取
 和零散小改）+ **可移植脚本 `scripts/firearm_listings.py`**（批量传图/建 gallery/上架，
 纯 Python + Frappe REST）。
+
+**操作系统**：Windows / Linux / macOS 都能跑，没有平台专属依赖。图片压缩用 Pillow
+（`pillow` + `pillow-heif`，`uv run` 会自动装），不再依赖 macOS 的 `sips`；`.env`
+的查找会在文件系统根目录停下，不管根是 `/` 还是 `C:\`。Windows 上照常
+`uv run scripts/firearm_listings.py ...`，路径参数用引号包住即可。
 
 **skill 发现**
 - **源文件只有一份**：repo 的 `.claude/skills/firearm-listing-import/`（受版本控制）。
@@ -136,7 +141,7 @@ uv run scripts/firearm_listings.py resolve --root "/path/to/with pictures N"
 uv run scripts/firearm_listings.py attach --root "/path/..." [--map map.json] [--only SERIAL_A,SERIAL_B] [--force]
 ```
 
-- **照片必须先 resize**（脚本默认就做：~2000px 长边、JPEG q80，用 `sips`）。**不要上传原图**——原因见下面"为什么 resize"。
+- **照片必须先 resize**（脚本默认就做：~2000px 长边、JPEG q80，用 Pillow，三平台一致；小于 2000px 的图保持原样不放大）。**不要上传原图**——原因见下面"为什么 resize"。
 - 每把枪：resize 每张图 → 上传到 POS（公开 File，attach 到该 Serial No）→ PUT 设置 `description`（来自 .txt，已去掉 `Title:` 行）+ `image_gallery` + `image`（主图）+ `item_name`（来自 `Title:` 行，没有就不写）。
 - `item_name` 就是这把枪在 Woo 上的商品标题；写完后**要 `push`（或重新 push）才会反映到已上架商品**。已上架的枪改了标题，跑 `attach --force` 或 `settitle` 后必须再 `push` 一次。
 - 幂等：已有 gallery 的序列号默认跳过；要重做加 `--force`。

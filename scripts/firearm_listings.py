@@ -47,17 +47,23 @@ FIREARM_ALLOW_PROD=1 is set explicitly: a stray Woo push can be unpublished, a
 stray GunBroker listing can be bought.
 
 Portable by design: pure Python + Frappe REST, no agent-specific tools — runs the
-same under Claude Code or Codex. Run with `uv run` (auto-installs the one dep via
+same under Claude Code or Codex. Run with `uv run` (auto-installs the deps via
 the inline metadata below) or the repo venv `mcp/.venv/bin/python`; a bare
-`python` will fail (the system interpreter has no `requests`).
+`python` will fail (the system interpreter has no `requests`/`pillow`).
 """
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["requests"]
+# dependencies = ["requests>=2.31,<3", "pillow>=10,<13", "pillow-heif>=0.16,<1"]
 # ///
 from __future__ import annotations
-import argparse, json, os, re, subprocess
+import argparse, json, os, re, sys, tempfile
 from urllib.parse import quote, urlparse
+
+# Windows pipes/files default to the ANSI code page in strict mode: a gun title
+# outside cp1252/cp936 would abort the batch with UnicodeEncodeError.
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
 import requests
 
 def _find_env():
@@ -69,12 +75,19 @@ def _find_env():
     symlinked, onto a machine where the repo lives elsewhere)."""
     if os.environ.get("FIREARM_ENV"):
         return os.environ["FIREARM_ENV"]
-    d = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve symlinks
-    while d != "/":
+    return _find_env_from(os.path.dirname(os.path.realpath(__file__)))  # realpath: resolve symlinks
+
+
+def _find_env_from(d):
+    """Walk up from `d` looking for mcp/.env. Split out so the loop is testable."""
+    while True:
         cand = os.path.join(d, "mcp", ".env")
         if os.path.exists(cand):
             return cand
-        d = os.path.dirname(d)
+        parent = os.path.dirname(d)
+        if parent == d:  # filesystem root ("/" or "C:\\") — stop, don't spin
+            break
+        d = parent
     raise FileNotFoundError(
         "mcp/.env not found above script. If this skill was copied (not symlinked) "
         "outside the repo, set FIREARM_ENV=/path/to/gunstore-pos/mcp/.env")
@@ -105,7 +118,7 @@ TITLE_RE = re.compile(r"\s*title\s*:\s*(.+?)\s*$", re.I)
 
 def load_cfg():
     cfg = {}
-    with open(ENV) as fh:
+    with open(ENV, encoding="utf-8-sig") as fh:
         for line in fh:
             line = line.strip()
             if "=" in line and not line.startswith("#"):
@@ -169,6 +182,7 @@ def _prod_gate_blocks(channel):
           f"\n"
           f"  If you really mean production, say so explicitly:\n"
           f"      {ALLOW_PROD_ENV}=1 uv run scripts/firearm_listings.py push \\\n"
+          f"      (PowerShell: $env:{ALLOW_PROD_ENV}=1 ; uv run ...)\n"
           f"          --channel gunbroker --root ... --only ONE_SERIAL\n"
           f"\n"
           f"  Ask the user first, and go one gun at a time.")
@@ -263,8 +277,21 @@ def read_desc(desc_path):
 
 
 def resize(src, dst):
-    subprocess.run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", str(QUALITY),
-                    "-Z", str(MAXPX), src, "--out", dst], check=True, capture_output=True)
+    """Long edge -> MAXPX, JPEG q=QUALITY. Pillow rather than macOS `sips`, so a
+    listing run behaves the same on Windows/Linux/macOS.
+
+    Two deliberate differences from the old `sips -s format jpeg -Z 2000`:
+    photos smaller than MAXPX are left alone (sips upscaled them, which invents
+    no detail and only grows the upload), and EXIF rotation is baked into the
+    pixels (sips kept the orientation tag, so a stripped tag meant a sideways
+    gun on the store)."""
+    from PIL import Image, ImageOps          # imported here so the stdlib-only
+    from pillow_heif import register_heif_opener  # test run needs no Pillow
+    register_heif_opener()  # .heic is in IMG_EXT; Pillow needs this plugin to open it
+    with Image.open(src) as im:
+        out = ImageOps.exif_transpose(im)  # bake in phone rotation; the JPEG save drops EXIF
+        out.thumbnail((MAXPX, MAXPX))      # aspect kept, never upscales
+        out.convert("RGB").save(dst, "JPEG", quality=QUALITY, optimize=True)
 
 
 def upload(serial, path):
@@ -293,7 +320,7 @@ def targets(args):
 # --- subcommands -----------------------------------------------------------
 
 def cmd_resolve(args):
-    ov = json.load(open(args.map)) if args.map else {}
+    ov = json.load(open(args.map, encoding="utf-8")) if args.map else {}
     print(f"BASE={BASE}\n")
     print(f"{'FOLDER':<14}{'SERIAL':<14}{'STATUS':<10}{'PRICE':<8}{'#img':<5}{'PRIMARY':<22}{'FLAGS':<26}TITLE")
     seen_items = {}
@@ -338,9 +365,9 @@ def cmd_resolve(args):
 
 
 def cmd_attach(args):
-    ov = json.load(open(args.map)) if args.map else {}
+    ov = json.load(open(args.map, encoding="utf-8")) if args.map else {}
     print(f"BASE={BASE}  (LIVE writes)\n")
-    tmp = os.path.join("/tmp", "firearm_resized")
+    tmp = os.path.join(tempfile.gettempdir(), "firearm_resized")
     for f in targets(args):
         fp = os.path.join(args.root, f)
         serial, how = resolve_serial(f, ov)
@@ -394,7 +421,7 @@ def cmd_push(args):
     if _prod_gate_blocks(channel):
         return
     method, id_field, timeout = PUSH_CHANNELS[channel]
-    ov = json.load(open(args.map)) if args.map else {}
+    ov = json.load(open(args.map, encoding="utf-8")) if args.map else {}
     print(f"BASE={BASE}  channel={channel}")
     if channel == "gunbroker":
         # Deliberately NOT "local" vs "LIVE". A local dev site holding
@@ -452,7 +479,7 @@ def cmd_push(args):
 def cmd_verify(args):
     channel = getattr(args, "channel", DEFAULT_CHANNEL)
     _, id_field, _ = PUSH_CHANNELS[channel]
-    ov = json.load(open(args.map)) if args.map else {}
+    ov = json.load(open(args.map, encoding="utf-8")) if args.map else {}
     for f in targets(args):
         serial, _ = resolve_serial(f, ov)
         if not serial:
