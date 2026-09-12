@@ -4,9 +4,6 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 `with pictures/<serial>/` folders onto **Serial No** records in a GunStore‑POS
 (Frappe/ERPNext) instance, and publishes each gun to WooCommerce as its own per‑serial product.
 
-> 给 Claude Code / Codex 用的 skill：把本地 `with pictures/<序列号>/` 文件夹里每把枪的
-> 照片 + 描述写到 POS 的 **Serial No** 上，并**按序列号**上架到 WooCommerce。
-
 > **Companion repo:** [`gunstore-pos-mcp`](https://github.com/xuanji86/gunstore-pos-mcp) — the
 > MCP server this skill uses for reads / small writes. (The skill also bundles a standalone
 > Frappe‑REST script for the image‑upload + Woo push path, so it runs without the MCP too.)
@@ -16,7 +13,7 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 | File | What |
 |---|---|
 | `SKILL.md` | The runbook the agent reads (data model, safety, workflow). |
-| `scripts/firearm_listings.py` | Portable Frappe‑REST tool: `resolve` / `attach` / `push` / `verify` / `testconn` / `setprice`. |
+| `scripts/firearm_listings.py` | Portable Frappe‑REST tool: `resolve` / `attach` / `push` / `verify` / `testconn` / `setprice` / `settitle`. |
 | `references/operator-guide.md` | Plain‑language, step‑by‑step guide for non‑technical operators (API key → folders → pricing → run → WooCommerce checks → the new‑arrivals email). |
 | `references/new-arrivals-email.md` | The post‑listing New Arrivals email: what to ask, and the `wp osa-growth new-arrivals` commands behind it. |
 | `references/internals.md` | Field names, code paths, gotchas. |
@@ -30,6 +27,29 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 - Woo listing is **per serial** via `push_serial_now` (not `woo_push_item`, which would push every sibling under the same Item).
 - Image bytes go over Frappe REST `upload_file` from the script (they can't pass through MCP tool calls without exploding the agent's context).
 - After the guns are live, the skill **asks whether to email the New Arrivals subscribers** and, only on an explicit yes, runs `wp osa-growth new-arrivals send` on the store host. Nothing is sent automatically — a timer used to fire an hour after the first listing, which is exactly when titles, prices and photos are still being corrected.
+
+## Folder and description format
+
+One subfolder per gun, named after its serial number, holding `description.txt` plus the photos.
+
+**Description file format** (`description.txt`, UTF-8). One `Title:` line is the only structure the tool parses; everything else is free text, written to the product description verbatim (newlines preserved). Photos sit next to it in the same folder.
+
+```
+<one or two paragraphs written for the buyer>
+
+Specifications
+Title: Type 38 Arisaka Training Rifle w/ Bayonet - Smoothbore Blank-Fire
+Manufacturer: Japanese production
+Country of origin: Japan
+Model: Type 38 Arisaka Training Rifle
+Action: Bolt-action
+...
+```
+
+- `Title:` may be on any line; case-insensitive; space after the colon optional. Only the first match is used, and that line is removed from the description.
+- The other `Key: value` lines are not parsed; they stay as text.
+- No Markdown or HTML (it would show literally).
+- Accepted photo extensions: `.jpg .jpeg .png .webp .heic`. `main.*` is the primary; otherwise the first by filename.
 
 ## Install
 
@@ -48,9 +68,9 @@ ln -sfn "$PWD/firearm-listing-import" ~/.codex/skills/firearm-listing-import
 - export `FIREARM_ENV=/path/to/gunstore-pos/mcp/.env`, **or**
 - run it from inside a gunstore‑pos checkout (the script auto‑finds `mcp/.env` by walking up).
 
-Generate the key in Frappe Desk → **My Settings → API Access → Generate Keys** (see `references/operator-guide.md` 第一部分).
+Generate the key in Frappe Desk → **My Settings → API Access → Generate Keys** (see `references/operator-guide.md`, Part 1).
 
-**3. Run** with `uv` (auto‑installs the one dependency via PEP 723 inline metadata) — never bare `python` (the system interpreter has no `requests`):
+**3. Run** with `uv` (installs the dependencies via PEP 723 inline metadata) — never bare `python` (the system interpreter has no `requests`):
 
 ```bash
 uv run scripts/firearm_listings.py testconn
@@ -74,6 +94,3 @@ python3 -m unittest discover -s tests -v
 - **`push --channel gunbroker` is refused against any non-local POS** unless `FIREARM_ALLOW_PROD=1` is set explicitly (exactly `1`; a typo fails closed). A mistaken Woo push can be unpublished — a mistaken GunBroker push puts a real firearm on a public marketplace where a buyer can commit before anyone notices. Note this gate keys on *locality*, not on sandbox-vs-live: which GunBroker gets contacted is `GunBroker Settings.sandbox_mode` on the POS, which this script can neither read nor set.
 - **The GunBroker MCP tools are a deployment prerequisite, not an option.** Any POS MCP instance that will list or end GunBroker listings must be started with `GUNSTORE_MCP_GUNBROKER_ACTIONS=1` — `gb_push_serial` and `gb_end_listing` are not registered without it (`gb_test_connection` / `gb_listing_status` always are). **Push and end are the same switch.** An instance that can list but not end is parked on the worst square: a gun sells at the counter, the assistant answers "I don't have that tool", and the listing stays up for a second buyer. Automatic delisting on a counter sale does not exist yet — it lands with PR-2/PR-3.
 - **No secrets in this repo** — credentials live only in your `mcp/.env` (or `FIREARM_ENV`). The operator guide shows placeholders only.
-
-> Note: the "平台兼容（已配好/已做好）" lines in `SKILL.md` describe the original gunstore‑pos
-> dev machine. For a fresh clone, follow the **Install** steps above.

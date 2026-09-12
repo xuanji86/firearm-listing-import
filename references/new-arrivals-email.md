@@ -1,57 +1,41 @@
-# New Arrivals 邮件（上架后手动发）
+# New Arrivals email (manual, after listing)
 
-上架完成后，网店可以给订阅"新品提醒"的顾客群发一封 digest。**这一步永远是问过用户
-之后才做的**——邮件发出去撤不回来，而上架刚结束的那几分钟恰恰是标题、价格、照片还在
-改的时候。
+After a listing run, the store can send a digest to customers subscribed to new-arrival alerts. **Always ask the user first.** The email cannot be recalled, and the minutes right after listing are when titles, prices, and photos are still being corrected.
 
-发送方是 WooCommerce 站上的 **osa-growth 插件 ≥ 1.10.0**（不是本 skill 的脚本，也不
-是 POS）。本 skill 只负责在正确的时机**问**，然后**替用户跑那条命令**。
+The sender is the **osa-growth plugin ≥ 1.10.0** on the WooCommerce site — not this skill's script, not the POS. This skill only asks at the right moment and runs the command on the user's behalf.
 
----
+## How it fits together
 
-## 它是怎么串起来的
+- Every newly **published** Woo product is appended by osa-growth to a queue (option `osa_na_queue`). Products created by `push_serial_now` land there automatically.
+- The queue only records; it never sends. The pre-1.10.0 "auto-send one hour after first listing" timer is gone.
+- Sending is a manual command. Only the products that actually appeared in the email are removed from the queue.
 
-- Woo 上**每新建一个 published 商品**，osa-growth 就把它的 post id 记进一个队列
-  （option `osa_na_queue`）。`push_serial_now` 建的每把枪都会自动进队列，不用做任何事。
-- 队列**只是记录**，本身不会发信。1.10.0 之前有个"首件上架 1 小时后自动发"的定时器，
-  已经关掉了——就是因为那一小时里东西还在改。
-- 发信是一条要人来敲的命令。发完之后，**只有真正出现在邮件里的那几件**会被移出队列。
+## Connection
 
-## 连接方式
-
-命令跑在 **Woo 站**上（不是 POS）。本机的值：
+Commands run on the **Woo host** (not the POS):
 
 ```bash
-OSA_WP_SSH=oldsteel                                   # SSH 别名
-OSA_WP_PATH=~/domains/oldsteelarsenal.com/public_html # WP 根目录
+OSA_WP_SSH=oldsteel                                   # SSH alias
+OSA_WP_PATH=~/domains/oldsteelarsenal.com/public_html # WP root
 ```
-
-所以一条命令长这样：
 
 ```bash
 ssh oldsteel 'cd ~/domains/oldsteelarsenal.com/public_html && wp osa-growth new-arrivals status'
 ```
 
-> 换一台机器就换成那台的 SSH 别名和路径；没有 SSH 权限就没法发信，如实告诉用户，
-> 别试图绕（osa-seo MCP 是 WooCommerce REST，发不了这封信）。
+On another machine, substitute that machine's alias and path. Without SSH access the email cannot be sent — say so; the osa-seo MCP (WooCommerce REST) cannot do it.
 
----
+## Subcommands
 
-## 五条子命令
-
-| 命令 | 作用 | 会不会改东西 |
+| Command | Purpose | Writes? |
 |---|---|---|
-| `status` | 队列里有什么、收件人多少、上次发了什么 | 只读 |
-| `preview` | 这封信会包含哪几件、什么标题、发给多少人 | **不改任何东西** |
-| `test --to=<邮箱>` | 往一个邮箱发一封真信 | 不动队列、不动统计 |
-| `send` | **真发**给订阅者 | 发信 + 消费队列 |
-| `clear` | 清空队列但不发信 | 只清队列 |
+| `status` | Queue contents, recipient count, last send | No |
+| `preview` | Which products, subject, recipient count | No |
+| `test --to=<email>` | One real email to one address | No queue / stats change |
+| `send` | Send to subscribers | Sends + consumes queue |
+| `clear` | Empty the queue without sending | Clears queue |
 
-### status —— 先看清楚要发什么
-
-```bash
-ssh oldsteel 'cd ~/domains/oldsteelarsenal.com/public_html && wp osa-growth new-arrivals status'
-```
+### status
 
 ```
 Automatic sending: OFF — send by hand
@@ -66,72 +50,56 @@ id	sku	name	price	state
 Recipients: 3 subscribed contact(s) tagged "new-arrivals".
 ```
 
-`state` 列要看：`announce` 才会进邮件，`skip: sold/out of stock`、`skip: draft`
-是已经卖掉或没发布的，发信时会被自动清掉。
+Only `state=announce` rows go into the email. `skip: sold/out of stock` and `skip: draft` are dropped at send time.
 
-### preview —— 把邮件内容摊开给用户看
+### preview
 
 ```bash
 ssh oldsteel 'cd … && wp osa-growth new-arrivals preview'
 ```
 
-打印将出现在邮件里的**那几件**（含顺序和价格）、标题行、收件人数。
-一封信最多放 **8 件**，其余显示成一行"…plus N more"，**并留在队列里等下一封**。
+Prints the products that will appear (order, price), the subject line, and the recipient count. Max **8 products** per email; the rest show as "…plus N more" and stay queued.
 
-要看真正的排版就加 `--html`，然后取回本地打开：
+For the rendered layout:
 
 ```bash
 ssh oldsteel 'cd … && wp osa-growth new-arrivals preview --html=/tmp/na.html'
 scp oldsteel:/tmp/na.html /tmp/na.html && open /tmp/na.html
 ```
 
-### test —— 往用户自己的邮箱先发一封
+### test
 
 ```bash
 ssh oldsteel 'cd … && wp osa-growth new-arrivals test --to=someone@example.com'
 ```
 
-主题、链接、排版都跟真信**一模一样**（所以收到时别误以为已经群发了——命令回显会写明
-只发给了谁）。它不带打开追踪像素、退订链接是通用的，因此不会污染这封 campaign 的
-打开率统计。
+Identical subject, links, and layout to the real send (the command output states who received it). No open-tracking pixel and a generic unsubscribe link, so campaign stats are not polluted.
 
-### send —— 真发
+### send
 
 ```bash
 ssh oldsteel 'cd … && wp osa-growth new-arrivals send'
 ```
 
-会先把"发给 N 人 / 共 M 件 / 标题是什么"打出来再等确认。**非交互执行必须加 `--yes`**
-（SSH 里没有 tty，不加会挂住）——所以在跑 `--yes` 之前，用户的"发"必须已经拿到了。
+Prints recipients / product count / subject and waits for confirmation. **Non-interactive runs need `--yes`** (no TTY over SSH; without it the command hangs). The user's "send" must already be in hand before running `--yes`.
 
-常用参数：
+- `--only=<refs>` — comma-separated SKUs (`CZ85::7408H`) or product ids. Not limited to the queue, so it can re-announce products listed earlier.
+- `--subject="…"` — override the subject. Default `12 new arrivals just hit the floor` (`New arrival: <name>` for a single product).
+- `--yes` — skip the prompt.
 
-- `--only=<refs>`：只发指定的几件，逗号分隔，**支持 SKU**（`CZ85::7408H`），也支持
-  商品 id。不受队列限制——可以补发上周就上架的东西。
-- `--subject="…"`：换标题行。默认是 `12 new arrivals just hit the floor`
-  （只有一件时是 `New arrival: <商品名>`）。用户对标题有要求就用这个。
-- `--yes`：跳过确认（非交互必需）。
+### clear
 
-### clear —— 这批不值得发
-
-补图、改价、重新上架、测试商品——这类不该惊动顾客的，清掉队列：
+For re-attaches, price fixes, re-pushes, test products:
 
 ```bash
 ssh oldsteel 'cd … && wp osa-growth new-arrivals clear --yes'
 ```
 
----
+## Pitfalls
 
-## 会踩的坑
-
-- **重新 push 已上架的商品不会再进队列**。队列只在商品**第一次**变成 published 时记录。
-  改完标题/价格重新 `push` 之后想announce，用 `send --only=<SKU>`。
-- **一封最多 8 件**。上架 27 把 → 第一封发 8 件、19 件留在队列。想全发就连着跑几次
-  `send`（每次都会提示"距上次发送不足 20 小时"，那只是提醒，不阻拦）。
-- **队列可能不止你刚上架的东西**。店里从别的途径发布的商品也在里面。`preview` 就是
-  用来发现这件事的——列表里有陌生商品就问用户，或者用 `--only` 圈定。
-- **收件人是订阅"新品提醒"的人**，不是全体顾客。想群发全体客户是另一件事，不走这条命令。
-- **没有照片的商品会用占位图**。`preview` 的 `photo` 列标 `PLACEHOLDER` 就是这种；
-  遇到先把图 attach 好再发，不然邮件里是一块灰底。
-- **失败一定要看回显**。收件人查不到、SMTP 挂了这类失败会**保留队列**并返回非零退出码，
-  修好再跑一次就行，不会丢东西。真发出去了才会消费队列。
+- **Re-pushing a listed product does not re-queue it.** The queue records the first transition to published. To announce after a title/price fix, use `send --only=<SKU>`.
+- **8 per email.** 27 listed → 8 sent, 19 queued. Run `send` repeatedly to drain (the "less than 20 hours since last send" notice is informational, not blocking).
+- **The queue may contain products you did not list.** Anything published on the store is in it. `preview` exists to catch this — ask the user about unfamiliar products or scope with `--only`.
+- **Recipients are new-arrival subscribers only**, not all customers.
+- **Products without photos get a placeholder** (`photo` column `PLACEHOLDER` in `preview`). Attach photos before sending.
+- **Read the output on failure.** Missing recipients or SMTP errors keep the queue and return non-zero; fix and re-run. The queue is consumed only on a successful send.

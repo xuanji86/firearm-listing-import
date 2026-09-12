@@ -1,4 +1,4 @@
-# Internals & gotchas — firearm-listing-import
+# Internals and gotchas
 
 Deeper reference for the workflow in `../SKILL.md`. Read when a step misbehaves
 or you need exact field names / code paths.

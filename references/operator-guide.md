@@ -1,81 +1,68 @@
-# 新手操作指南（不需要编程基础）
+# Operator Guide (no technical background needed)
 
-这是给店里实际操作的人看的一步步手册：从第一次配置密钥，到把枪上架，再到在
-WooCommerce 后台检查结果。每一步都可以**直接让 AI 助手帮你做**（你正在用的助手——
-Claude Code 或 Codex 都行）——看到 `👉 对 AI 助手说：` 的地方，照着说就行，不用自己
-敲命令。
+Step-by-step guide for the person at the shop: first-time key setup, listing guns, checking the result in WooCommerce. Every step can be done by the AI assistant (Claude Code or Codex). Where you see `👉 Tell the assistant:`, say that — no commands to type.
 
-给 AI 助手的提示（Claude Code / Codex 通用）：当用户是非技术背景、第一次用、需要配置
-密钥、或说"带我一步步做 / 我自己不会"时，就照本文一段一段带着做，并**代替用户执行
-命令**，每完成一步用大白话告诉他结果，再问要不要继续。优先用脚本
-`scripts/firearm_listings.py`（任何 agent 都能跑），别依赖只有某个 agent 才有的工具。
+Note for the assistant: when the user is non-technical, new, needs the API key set up, or says "walk me through it", follow this guide section by section, run the commands yourself, report each result in plain language, and ask before continuing. Prefer `scripts/firearm_listings.py` (works on any agent) over agent-specific tools.
 
 ---
 
-## 它能做什么（一句话）
+## What it does
 
-把电脑上某个文件夹里"每把枪一个子文件夹（照片 + 一段描述）"的内容，写到 POS 系统
-对应的枪上，并把每把枪作为单独商品上架到网店 oldsteelarsenal.com。
+Takes a folder on your computer with one subfolder per gun (photos + a description), writes that onto the matching gun in the POS, and lists each gun as its own product on oldsteelarsenal.com.
 
----
+## Before you start
 
-## 开始前的三样准备
-
-1. **照片文件夹**（见下面第二部分的格式）。
-2. **每把要上架的枪在 POS 里已经定好卖价**（没定价会以 $0.00 上架，工具会自动跳过
-   并提醒你）。
-3. 电脑上已经装好这个项目、能打开 AI 助手（你现在用的这个）。
+1. The photo folder (format in Part 2).
+2. Every gun to be listed has a **sell price** in the POS (unpriced guns are skipped and reported).
+3. The project is installed and the AI assistant is open.
 
 ---
 
-## 第一部分：配置 API 密钥（一次性，只做一次）
+## Part 1: API key (one-time)
 
-**为什么要做**：工具需要一把"钥匙"才能登录 POS 系统帮你写数据。钥匙在 POS 网站里
-生成，然后存到项目的一个文件里。
+The tool needs a key to log in to the POS. Generate it on the POS site and store it in the project.
 
-1. 用浏览器打开 **https://pos.oldsteelarsenal.com**，用**管理员账号**登录。
-2. 点右上角你的**头像／用户名** → 菜单里选 **My Settings**（我的设置）。
-3. 在设置页往下找到 **API Access** 区域，点 **Generate Keys**（生成密钥）。
-4. 屏幕会显示两串字符：
-   - **API Key**（一直能看到）
-   - **API Secret**（**只显示这一次**！马上复制保存好，关掉就再也看不到了）
-5. 把这两串值存进项目里的 `mcp/.env` 文件，对应这两行：
+1. Open **https://pos.oldsteelarsenal.com** and log in as an **administrator**.
+2. Click your avatar / name (top right) → **My Settings**.
+3. Scroll to **API Access** → **Generate Keys**.
+4. Two values appear: **API Key** (always visible) and **API Secret** (**shown once only** — copy it now).
+5. Put them in the project's `mcp/.env`:
    ```
-   FRAPPE_API_KEY=这里粘贴 API Key
-   FRAPPE_API_SECRET=这里粘贴 API Secret
+   FRAPPE_API_KEY=<paste API Key>
+   FRAPPE_API_SECRET=<paste API Secret>
    ```
-   👉 不会编辑文件？把两串值直接发给 AI 助手，说：
-   **"帮我把这个 API Key 和 Secret 填进 mcp/.env"** —— 让它来填。
-6. 验证能连上：
-   👉 可以对 AI 助手说：**"测试一下 POS 和 woocommerce 连接通不通"**
-   它会去探一下，看到"连上了"就配置成功。
+   👉 Tell the assistant: **"Put this API Key and Secret into mcp/.env"** and paste both values.
+6. Verify: 👉 **"Test the POS and WooCommerce connections"**. "OK" means setup is done.
 
-⚠️ 这把钥匙等于你的登录权限。**别截图发群、别给陌生人。** 如果泄露了，回到第 3 步
-重新 Generate Keys，旧的就失效了。
+⚠️ The key is your login. Do not screenshot it into group chats or share it. If leaked, repeat step 3 — the old key stops working.
 
 ---
 
-## 第二部分：整理照片文件夹
+## Part 2: Organize the photo folder
 
-规则很简单：
+- **One subfolder per gun**, named after the gun's **serial number** (match the POS as closely as you can).
+- Inside each subfolder:
+  - **One description file** `description.txt`. Include a line `Title: <listing title>` (usually in the `Specifications` block). That becomes the gun's own product title on the store; the tool removes the line from the description body. Without it the gun is listed under the shared model name (every gun of that model gets the same title).
+  - **Photos**: `.jpg` / `.jpeg` / `.png` / `.webp` / `.heic`.
+- Name the **primary photo** (the one customers see first) **`main.jpg`** (any case). Without it, the first photo by filename is used.
 
-- **每把枪一个子文件夹**，文件夹的名字就是**枪的序列号**（要和系统里登记的尽量一致）。
-- 子文件夹里放：
-  - **一个描述文件**：`description.txt`（里面是这把枪的文字介绍）。描述里建议有一行
-    `Title: 这把枪的标题`（一般放在 `Specifications` 那段里），这就是这把枪在网店上
-    **单独的商品标题**——工具会用它当商品名，并把这行从描述正文里去掉。没有这行也能上架，
-    只是商品名会用共享的型号名（同型号的枪标题就都一样了）。
-  - **若干照片**：`.jpg` / `.jpeg` / `.png` 都行。
-- **主图**（顾客第一眼看到那张）命名成 **`main.jpg`**（大小写都行）。如果没有 main，
-  工具会自动把按文件名排第一的那张当主图。
-
-例子：
+Example `description.txt` (the `Title:` line can be anywhere; everything else is plain text shown to the customer as-is):
 
 ```
-我的枪照片/
+Type 38 Arisaka training rifle configured as a smoothbore blank-firing training gun. ...
+
+Specifications
+Title: Type 38 Arisaka Training Rifle w/ Bayonet - Smoothbore Blank-Fire
+Manufacturer: Japanese production
+Model: Type 38 Arisaka Training Rifle
+Action: Bolt-action
+```
+
+```
+my gun photos/
 ├── 2695v/
 │   ├── description.txt
-│   ├── main.jpg          ← 主图
+│   ├── main.jpg          ← primary
 │   ├── IMG_1301.jpg
 │   └── IMG_1302.jpg
 └── 855242/
@@ -84,209 +71,138 @@ Claude Code 或 Codex 都行）——看到 `👉 对 AI 助手说：` 的地方
     └── ...
 ```
 
-照片可以是手机原图，**不用自己压缩**——工具会自动缩小到适合网店的尺寸（这一步很关键，
-原图太大网店会上传超时）。
+Phone originals are fine — the tool resizes them (originals are too large and time out on the store).
 
 ---
 
-## 第三部分：确认价格（很重要）
+## Part 3: Confirm prices
 
-每把要上架的枪，POS 里必须有**卖价（Sell Price）**，否则会以 **$0.00** 上架。
+Each gun needs a **Sell Price** in the POS or it lists at **$0.00**.
 
-- 在 POS 里给某把枪（按序列号）填上 Sell Price 即可。
-- 👉 嫌麻烦也可以对 AI 助手说：**"把序列号 2695v 的卖价设成 3989"**，让它直接帮你
-  在系统里设好。
-- 没定价的枪，上架那一步会被**自动跳过**，AI 助手会把它们列出来提醒你——你定完价
-  再让它补上架。
+- Set it on the gun (by serial) in the POS, or
+- 👉 **"Set the sell price of serial 2695v to 3989"**.
+- Unpriced guns are **skipped** at the listing step and reported back to you. Price them and ask again.
 
 ---
 
-## 第四部分：开始上架（最省事的方式 = 让 AI 助手做）
+## Part 4: List the guns
 
-**最简单**：直接用大白话告诉 AI 助手你要干什么，例如：
+👉 **"Use firearm-listing-import to update the guns from `/Users/me/Desktop/my gun photos` and list them on woocommerce"**
 
-> 👉 **"用 firearm-listing-import，把 `/Users/我/Desktop/我的枪照片` 里的图片和
-> 描述更新到枪上，然后上架到 woocommerce"**
+The assistant will:
 
-AI 助手会按安全顺序帮你做：
+1. **Resolve** — show which folder maps to which gun, with price, photo count, and any problems. Nothing is written.
+2. Wait for your **OK**.
+3. **Canary** — process the first gun only, for you to check.
+4. Wait for your **OK** again, then process the rest.
+5. When done, **ask whether to send the New Arrivals email** (Part 6).
 
-1. **先列清单（resolve）**——把每个文件夹对应到哪把枪、价格多少、几张照片、有没有
-   问题，列给你看。**这一步不写任何东西，只是核对。**
-2. **你确认**没问题。
-3. **先做一把给你看（canary）**——只处理第一把，让你检查无误。
-4. **你再确认**，它才**批量**处理其余的。
-5. 全部上架完，它会**问你要不要给订阅顾客发新品邮件**（见第六部分）。
+If a folder name does not match a serial (`UNRESOLVED`), the assistant asks you for the correct serial.
 
-如果某个文件夹名和系统里的序列号对不上（显示 `UNRESOLVED`），AI 助手会问你这把枪的
-**正确序列号**，你告诉它就行。
-
-> 进阶（想自己在终端跑的人）：命令依次是
-> `resolve`（核对）→ `attach`（写照片+描述）→ `push`（上架）→ `verify`（复核），
-> 都带 `--root "照片文件夹路径"`。运行用
-> `uv run scripts/firearm_listings.py <命令> …`（别用裸 `python`，系统自带的没装
-> `requests`）。具体见 SKILL.md。
+> Terminal users: `resolve` → `attach` → `push` → `verify`, each with `--root "<folder>"`, run as `uv run scripts/firearm_listings.py <command> …` (never bare `python`). Details in SKILL.md.
 
 ---
 
-## 第五部分：在 WooCommerce 后台检查结果
+## Part 5: Check the result in WooCommerce
 
-上架后，去网店后台看看效果：
+1. Open **https://oldsteelarsenal.com/wp-admin** and log in.
+2. **Products → All Products**.
+3. Search the **serial number** (SKU is `model::serial`, e.g. `P08-9MM::2695v`).
+4. Open the product and check:
+   - **Status = Published**
+   - **Title** is the gun's `Title:` from the description, not the generic model name. To fix: 👉 **"Change the title of serial X to …"** (uses `settitle`, then re-lists).
+   - **Price**
+   - **Product image** is the `main` photo; **gallery** has the rest.
+   - **Description**
+   - **Stock**: In stock, quantity 1.
 
-1. 浏览器打开 **https://oldsteelarsenal.com/wp-admin**，登录。
-2. 左侧菜单点 **Products**（商品）→ **All Products**（所有商品）。
-3. 在搜索框输入**序列号**找到这把枪（商品的 SKU 是 `型号::序列号`，例如
-   `P08-9MM::2695v`）。
-4. 点开商品，对照检查：
-   - **Status = Published**（已发布）——右上角"Publish"区域。
-   - **商品标题**（最上面那行商品名）是不是描述里的 `Title:`——每把枪应是各自的标题，
-     不是笼统的型号名。不对就改描述里的 `Title:` 行重新上架，或让 AI 助手
-     **"把序列号 X 的标题改成 …"**（它会用 `settitle` 改完再重新上架）。
-   - **Price**（价格）对不对。
-   - **Product image**（主图）是不是那张 `main`。
-   - **Product gallery**（相册）其它照片都在。
-   - **Description**（描述）正常。
-   - **Stock**（库存）显示 In stock、数量 1。
+**Temporarily hide a gun:** open the product → set **Status** to **Draft** → **Update**.
 
-### 想临时下架某把枪
-打开商品 → 右上 "Publish" 区域把 **Status** 改成 **Draft**（草稿）→ 点 **Update**。
-顾客就看不到了。
+**Wrong price or photos:** POS is the source of truth; do not fix it only on the store (the next sync may overwrite it).
 
-### 商品有错（价格是 $0、图不对、描述错）怎么办
-**价格和照片以 POS 为准，不要只在网店上改**（下次系统同步可能把你在网店上的改动盖掉）。
-正确做法：
-
-- **价格错** → 回 POS 改好这把枪的卖价 → 👉 让 AI 助手 **"重新上架序列号 X"**
-  （它会**更新**已有商品，不会重复新建）。
-- **照片错／要换** → 改好本地文件夹里的照片 → 👉 让 AI 助手
-  **"重新 attach 序列号 X 的照片（用 --force）再上架"**。
+- Wrong price → fix the sell price in the POS → 👉 **"Re-list serial X"** (updates the existing product, no duplicate).
+- Wrong photos → fix the local folder → 👉 **"Re-attach photos for serial X with --force, then re-list"**.
 
 ---
 
-## 第五部分之二：上架到 GunBroker（第三个销售渠道）
+## Part 5b: GunBroker (third sales channel)
 
-GunBroker 是拍卖行式的枪械交易网站，是**网店之外的第二个卖场**。同一把枪可以既在
-自家网店挂着、也在 GunBroker 挂着——用的是同一张照片、同一段描述、同一个卖价
-（POS 里的卖价），所以**前面第二、第三部分做过的事不用重做**。
+GunBroker is an auction marketplace, a second storefront next to the website. The same photos, description, and POS sell price are reused — Parts 2 and 3 need no repeating.
 
-### 现在还在试运行阶段
+**Currently in trial: only the local test site is allowed.** If the assistant answers "REFUSED", the guard is working as intended. Do not work around it.
 
-这个渠道刚做好，**默认只对本地测试站开放**。你让 AI 助手往 GunBroker 上架时，
-如果它说"REFUSED（拒绝）"，那不是坏了，是护栏在起作用——目前就该是这样。
-什么时候正式开、由谁开，等通知。
+**Why more care than the website:** a wrong website listing becomes invisible as a Draft. A GunBroker listing is a real gun on a public marketplace; a buyer can commit immediately, and ending it early needs a human on the GunBroker site. So: **one gun at a time (canary)**, check the live page, then the next.
 
-### 为什么这个渠道比网店更要小心
+👉 **"List serial X on GunBroker"** (one gun, not "all"). Open the returned listing link and check title, price, photos, description.
 
-网店上错了，把商品改成草稿就没人看得见了。**GunBroker 不一样**：
+### A GunBroker-listed gun sold at the counter
 
-- 枪一挂上去就是公开拍卖行里的真货，**买家可以立刻拍下**，不会等你发现错误。
-- 想提前撤下来，得有人**登录 GunBroker 网站手动结束**这条 listing，POS 这边不一定
-  能自动搞定。
+⚠️ Someone must end that listing. Automatic delisting on a counter sale is not built yet.
 
-所以规矩是：**一次只上一把（canary），看过真实页面没问题，再说下一把。**
+👉 **"End the GunBroker listing for serial X"**
 
-### 怎么让 AI 助手做
+The only proof is that you can no longer find the listing on GunBroker. All of these mean **not ended** — log in to GunBroker and click **End Item Early** on the listing:
 
-👉 **"用 GunBroker 通道上架序列号 X"**（先说一把，别说"全部"）
-
-上架成功后它会给你一个 GunBroker 的商品号。**打开那个链接亲眼看一遍**：标题、价格、
-照片、描述对不对。确认了再继续下一把。
-
-### 一把枪在柜台卖掉了怎么办
-
-⚠️ **现阶段：卖掉一把挂在 GunBroker 上的枪，必须有人去把那条 listing 结束掉。**
-
-"卖掉就自动下架"这个功能**还没做好**（在后续版本里）。所以在试运行阶段，只要一把
-在 GunBroker 上挂着的枪在柜台卖了，就跟 AI 助手说：
-
-👉 **"把序列号 X 的 GunBroker listing 结束掉"**
-
-**唯一的判定标准：你有没有亲眼确认那条 listing 已经不在 GunBroker 上了。**
-在确认之前，这把枪都还可能被网上的买家买走。下面三种回话都算**没结束**，
-处理方式完全一样——**登录 GunBroker 网站，在那条 listing 上点 "End Item Early"
-（提前结束）**：
-
-| AI 助手说 | 什么意思 |
+| Assistant says | Meaning |
 |---|---|
-| 提到 **"pending_manual"**，或"这把枪还能被买走" | 它试过了，没成功 |
-| **"我没有这个工具" / 工具列表里找不到 `gb_end_listing`** | 这台机器没开 GunBroker 写工具的开关（见下），它**根本没试** |
-| 报错、超时、或者你看不懂它在说什么 | 当作没结束 |
+| "pending_manual" or "the gun can still be bought" | It tried and failed |
+| "I don't have that tool" / no `gb_end_listing` | GunBroker write tools are off on this machine; it did not try |
+| Error, timeout, or anything unclear | Treat as not ended |
 
-**别等它说 "pending_manual" 才动手。** 只有在它明确说结束成功、并且你在 GunBroker 上
-翻不到那条 listing 了，这件事才算完。
+> For whoever deploys the MCP: `gb_push_serial` and `gb_end_listing` share one switch, `GUNSTORE_MCP_GUNBROKER_ACTIONS=1`. A machine that can list but not end is the worst configuration.
 
-> **给部署的人（这是硬性前置，不是建议）**：`gb_push_serial`（上架）和
-> `gb_end_listing`（结束）是**同一个开关**控制的——启动 MCP 时**必须**设
-> `GUNSTORE_MCP_GUNBROKER_ACTIONS=1`，两个才都在。
-> **不要只想着开上架**：能上架却不能结束的机器，正好卡在最危险的那个位置上。
+A gun sold at the counter and still on GunBroker can be sold twice.
 
-**这一条是整份文档里最要紧的：** 枪已经卖给柜台的顾客了，GunBroker 上还挂着，
-就可能被网上的买家再买一次。同一把枪卖两次，收拾起来非常麻烦。
+### "Skipped" is not an error
 
-### AI 助手说"跳过"了怎么办
-
-跳过是正常回答，不是报错。照它给的原因处理：
-
-- **未定价** → 回 POS 填卖价（同第三部分）。
-- **已上架** → 这把枪本来就在 GunBroker 上了，不用重复上。
-- **被另一个渠道预留** → 这把枪在自家网店已经有人下单了，等那单处理完再说。
+- **Unpriced** → set the sell price (Part 3).
+- **Already listed** → it is already on GunBroker.
+- **Reserved by another channel** → a website order exists for it; wait for that order.
 
 ---
 
-## 第六部分：要不要给顾客发"新品到货"邮件
+## Part 6: New Arrivals email
 
-网店有一批顾客订阅了**新品提醒**。上架完之后可以给他们群发一封信，把这几把枪配图
-放进去。
+Subscribers to new-arrival alerts can get a digest with the guns just listed, with photos.
 
-**这一步不会自己发生**——AI 助手会先问你，你说"发"它才发。（以前是"上架一小时后自动
-发"，已经改掉了：那一小时里标题、价格、照片经常还在改，等于把没定稿的东西发出去。）
+**Nothing is sent automatically.** The assistant asks; it sends only when you say so.
 
-怎么用：
+1. After listing, the assistant tells you which guns, the subject line, and how many recipients.
+2. You can say:
+   - 👉 **"Send it"**
+   - 👉 **"Send a test to my inbox first"** — one real email to you only, nothing else changes.
+   - 👉 **"Change the subject to '…'"**
+   - 👉 **"Only include these serials: …"**
+   - 👉 **"Don't send for this batch"** — e.g. photo fixes, price changes, re-lists. Say it, or those guns end up in the next email.
 
-1. 上架完，AI 助手会告诉你 **这封信会包含哪几把枪、标题是什么、发给多少人**。
-2. 你可以：
-   - 👉 **"发吧"** —— 直接群发。
-   - 👉 **"先发一封到我邮箱看看"** —— 只发给你一个人，跟真信长得一模一样，不动任何数据。
-     （收到时注意看是发给你自己的，不是已经群发了。）
-   - 👉 **"标题换成 '…'"** —— 用你写的标题发。
-   - 👉 **"只发其中这几把"** —— 告诉它序列号即可。
-   - 👉 **"这批不发"** —— 比如只是补图、改价、重新上架，不该惊动顾客。**要说出来**，
-     否则这几把会混进下一封信里。
-
-要知道的两件事：
-
-- **一封信最多放 8 把枪**。上架 20 把 → 第一封发 8 把，剩下 12 把还排着队，可以接着
-  再让它发一封。
-- **没照片的枪在邮件里是一块灰色占位图**。AI 助手会提前告诉你哪几把是这种情况——
-  先把照片补上再发。
+- One email holds at most **8 guns**. List 20 → the first email has 8, the remaining 12 stay queued for another send.
+- Guns without photos show a grey placeholder. The assistant flags them; add photos first.
 
 ---
 
-## 常见提示词速查（看到这些状况就这么跟 AI 助手说）
+## Quick phrases
 
-| 你看到 / 想做 | 👉 对 AI 助手说 |
+| Situation | 👉 Tell the assistant |
 |---|---|
-| 第一次配置 | "帮我配置 POS 的 API 密钥，带我一步步做" |
-| 想先看清单不写入 | "先 resolve 一下 `照片文件夹路径`，别写任何东西" |
-| 全部上架 | "把 `照片文件夹路径` 的图片描述更新并上架到 woo" |
-| 某把没价（UNPRICED $0） | "把序列号 X 的卖价设成 1234，再上架" |
-| 标题不对／要改（NO-TITLE 或想换标题） | "把序列号 X 的标题改成 '……'，再重新上架" |
-| 序列号对不上（UNRESOLVED） | "文件夹 CR1159 其实是序列号 SYA1139，用这个" |
-| 上架后检查 | "在 woocommerce 上确认这几把枪都上架对了" |
-| 想挂到 GunBroker（试运行） | "用 GunBroker 通道上架序列号 X"（先一把，看过真实页面再继续） |
-| AI 说 GunBroker 那条 "REFUSED" | 护栏在起作用，**别绕**——目前该渠道只对测试站开放 |
-| AI 提到 "pending_manual" / "还能被买走" | 立刻登录 GunBroker 手动结束那条 listing（防止一枪两卖） |
-| AI 说"没有 `gb_end_listing` 这个工具" | 一样：**自己登录 GunBroker，在那条 listing 上点 "End Item Early"**；顺便告诉部署的人要开 `GUNSTORE_MCP_GUNBROKER_ACTIONS=1` |
-| 临时下架 | （去 wp-admin 把 Status 改 Draft；或让 AI 助手 delist） |
-| 想发新品邮件 | "给订阅的顾客发一封新品邮件" |
-| 想先看看信长什么样 | "先发一封新品邮件到我邮箱" |
-| 这批不发邮件 | "这批不用发新品邮件，把队列清掉" |
+| First-time setup | "Set up the POS API key and walk me through it" |
+| Check the plan only | "Resolve `<folder>` without writing anything" |
+| List everything | "Update and list the guns in `<folder>` on woo" |
+| Unpriced (`UNPRICED $0`) | "Set the sell price of serial X to 1234, then list it" |
+| Wrong / missing title (`NO-TITLE`) | "Change the title of serial X to '…' and re-list" |
+| Serial mismatch (`UNRESOLVED`) | "Folder CR1159 is actually serial SYA1139" |
+| Check after listing | "Confirm these guns are listed correctly on woocommerce" |
+| GunBroker (trial) | "List serial X on GunBroker" (one at a time) |
+| GunBroker "REFUSED" | Guard working; do not bypass |
+| "pending_manual" / no `gb_end_listing` tool | Log in to GunBroker and End Item Early; tell the deployer to set `GUNSTORE_MCP_GUNBROKER_ACTIONS=1` |
+| Hide a gun | Set Status to Draft in wp-admin, or ask the assistant to delist |
+| Send the email | "Send the new arrivals email to subscribers" |
+| Preview the email | "Send a test new arrivals email to my inbox" |
+| Skip the email | "No new arrivals email for this batch, clear the queue" |
 
 ---
 
-## 安全提醒
+## Safety
 
-- 这套操作直接改**线上正式店**：照片、描述、价格一改就是顾客能看到的。AI 助手会在
-  批量动手前先给你清单、先做一把让你确认——**遇到拿不准的，先停下问**。
-- **GunBroker 渠道现在只对测试站开放**（第五部分之二）。看到"REFUSED"是护栏在起作用，
-  不要让 AI 助手想办法绕过去——那道门就是防止真枪被误挂上公开拍卖行的。
-- API 密钥妥善保管，泄露就去 POS 重新生成。
+- This edits the **live store**. The assistant shows the plan and does one gun first; when unsure, stop and ask.
+- GunBroker is restricted to the test site. "REFUSED" is the guard; do not bypass it.
+- Keep the API key private; regenerate it in the POS if leaked.
