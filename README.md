@@ -2,7 +2,8 @@
 
 A **Claude Code / Codex skill** that imports per‑gun photos + descriptions from local
 `with pictures/<serial>/` folders onto **Serial No** records in a GunStore‑POS
-(Frappe/ERPNext) instance, and publishes each gun to WooCommerce as its own per‑serial product.
+(Frappe/ERPNext) instance, and publishes each gun as its own per‑serial listing on WooCommerce
+(and, per serial, on GunBroker).
 
 > **Companion repo:** [`gunstore-pos-mcp`](https://github.com/xuanji86/gunstore-pos-mcp) — the
 > MCP server this skill uses for reads / small writes. (The skill also bundles a standalone
@@ -20,13 +21,12 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 
 ## How it works (the short version)
 
-- Each folder is named after a firearm serial number and holds one description `.txt` + photos.
 - Per‑gun data lives on the **Serial No** record (`image` / `image_gallery` / `description` / `item_name`), **not** the model Item (one Item backs many serials).
-- Each gun gets **its own WooCommerce listing title** from a `Title:` line in the description `.txt` → written to `Serial No.item_name` (the field the Woo payload builder uses for the product name, falling back to the shared model name). No `Title:` line ⇒ the gun keeps the shared model name (`resolve` flags `NO-TITLE`).
+- The `Title:` line of the description becomes `Serial No.item_name`, the per‑gun product name (falls back to the shared model name; `resolve` flags `NO-TITLE`).
 - Photos are **resized (~2000px/q80) before upload** — full‑size phone photos blow past the POS→Woo 30s image‑sideload timeout.
-- Woo listing is **per serial** via `push_serial_now` (not `woo_push_item`, which would push every sibling under the same Item).
+- Listing is **per serial** via `push_serial_now` (not `woo_push_item`, which pushes every sibling under the same Item). `push --channel gunbroker` lists the same gun on GunBroker with the same photos, description and price.
 - Image bytes go over Frappe REST `upload_file` from the script (they can't pass through MCP tool calls without exploding the agent's context).
-- After the guns are live, the skill **asks whether to email the New Arrivals subscribers** and, only on an explicit yes, runs `wp osa-growth new-arrivals send` on the store host. Nothing is sent automatically — a timer used to fire an hour after the first listing, which is exactly when titles, prices and photos are still being corrected.
+- After the guns are live, the skill **asks whether to email the New Arrivals subscribers** and runs `wp osa-growth new-arrivals send` on the store host only on an explicit yes. Nothing is sent automatically.
 
 ## Folder and description format
 
@@ -91,6 +91,6 @@ python3 -m unittest discover -s tests -v
 
 - `attach` / `push` / `setprice` are **live writes** to a real POS + WooCommerce store. The tool prints the target before writing, refuses fuzzy serial matches, and the runbook mandates **resolve‑first + canary** (do one, verify, then batch).
 - The New Arrivals email reaches every subscriber at once and cannot be recalled. The runbook forbids `send` without an explicit yes from the operator, and puts `preview` (read‑only) and `test --to=` (one address, no state touched) in front of it.
-- **`push --channel gunbroker` is refused against any non-local POS** unless `FIREARM_ALLOW_PROD=1` is set explicitly (exactly `1`; a typo fails closed). A mistaken Woo push can be unpublished — a mistaken GunBroker push puts a real firearm on a public marketplace where a buyer can commit before anyone notices. Note this gate keys on *locality*, not on sandbox-vs-live: which GunBroker gets contacted is `GunBroker Settings.sandbox_mode` on the POS, which this script can neither read nor set.
-- **The GunBroker MCP tools are a deployment prerequisite, not an option.** Any POS MCP instance that will list or end GunBroker listings must be started with `GUNSTORE_MCP_GUNBROKER_ACTIONS=1` — `gb_push_serial` and `gb_end_listing` are not registered without it (`gb_test_connection` / `gb_listing_status` always are). **Push and end are the same switch.** An instance that can list but not end is parked on the worst square: a gun sells at the counter, the assistant answers "I don't have that tool", and the listing stays up for a second buyer. Automatic delisting on a counter sale does not exist yet — it lands with PR-2/PR-3.
+- **`push --channel gunbroker` is refused against any non-local POS** unless `FIREARM_ALLOW_PROD=1` (exactly `1`; anything else fails closed). A wrong Woo push can be unpublished; a wrong GunBroker push is a real firearm on a public marketplace. The gate keys on locality only — sandbox vs live is `GunBroker Settings.sandbox_mode` on the POS, which the script cannot read or set.
+- **GunBroker MCP tools need `GUNSTORE_MCP_GUNBROKER_ACTIONS=1`** at MCP startup; `gb_push_serial` and `gb_end_listing` share that switch. An instance that can list but not end leaves sold guns on GunBroker. Automatic delisting on a counter sale is not built yet (PR-2/PR-3).
 - **No secrets in this repo** — credentials live only in your `mcp/.env` (or `FIREARM_ENV`). The operator guide shows placeholders only.
