@@ -280,6 +280,14 @@ def split_title(text):
     return title, unwrap_paragraphs("\n".join(kept).strip())
 
 
+def read_desc(desc_path):
+    """(title, body) from a description file path; (None, "") when path is None.
+    Thin path->text bridge for cmd_resolve/cmd_attach over split_title()."""
+    if not desc_path:
+        return None, ""
+    return split_title(open(desc_path, encoding="utf-8", errors="replace").read())
+
+
 def unwrap_paragraphs(body):
     """Merge hard-wrapped prose back into one line per paragraph.
 
