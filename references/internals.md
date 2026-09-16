@@ -8,7 +8,7 @@ or you need exact field names / code paths.
 **Serial No** (per physical gun) custom fields — defined in `ffl_core`:
 - `image` (Attach Image, label "Photo") — single featured photo
 - `image_gallery` (Table → `Item Image Gallery`: `image`, `is_primary`, `sort_order`, `caption`)
-- `description` (Text, plain — newlines preserved; Woo renders them as `<br>`)
+- `description` (Text, plain — every newline becomes `<br>` on Woo, so `attach` unwraps hard-wrapped prose first (`unwrap_paragraphs`); keep one paragraph per line, blank line between paragraphs)
 - `sell_price` (Currency) — per-serial tag price; `woo_product_id`, `woo_delisted`, `woo_reserved`, `status`
 
 **Serial No `item_name` (the per-gun Woo title)** — a *standard* ERPNext field (not a custom field), `fetch_from: item_code.item_name`, `fetch_if_empty: 1`, `read_only: 1`. Normally it mirrors the parent `Item.item_name` (the shared model name). Writing a per-gun value via REST:

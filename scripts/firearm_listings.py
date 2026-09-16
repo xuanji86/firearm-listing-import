@@ -114,6 +114,17 @@ ALLOW_PROD_ENV = "FIREARM_ALLOW_PROD"
 # Per-gun WooCommerce title: a "Title: ..." line in the description .txt (colon may
 # have no following space; matched anywhere, line-anchored, case-insensitive).
 TITLE_RE = re.compile(r"\s*title\s*:\s*(.+?)\s*$", re.I)
+# A "Key: value" spec line (Manufacturer: ..., Country of origin: ...). Never
+# merged with its neighbours by unwrap_paragraphs — each one is its own line on
+# the store. Key = 1–3 capitalised-start words, so wrapped prose that happens to
+# carry a colon ("is near excellent: the stock ..." / "Chamberings followed the
+# customer: ...") is still prose.
+KV_RE = re.compile(r"\s*[A-Z][\w/&'-]*(?:[ \t]+[\w/&'-]+){0,2}:\s")
+# A bare heading such as "Specifications": 1–3 words, no punctuation at all.
+HEADING_RE = re.compile(r"\s*[A-Za-z][\w&/-]*(?:[ \t]+[\w&/-]+){0,2}\s*$")
+# Sentence-final characters. A prose line that ends with none of these was cut
+# mid-sentence by a hard wrap.
+SENTENCE_END = tuple(".!?:;\"'\u201d\u2019)")
 
 
 def load_cfg():
@@ -266,14 +277,47 @@ def split_title(text):
             title = m.group(1).strip()
             continue  # drop the Title: line from the customer-facing description
         kept.append(line)
-    return title, "\n".join(kept).strip()
+    return title, unwrap_paragraphs("\n".join(kept).strip())
 
 
-def read_desc(desc_path):
-    """(title, body) from a description file path; ('', '') when path is None."""
-    if not desc_path:
-        return None, ""
-    return split_title(open(desc_path, encoding="utf-8", errors="replace").read())
+def unwrap_paragraphs(body):
+    """Merge hard-wrapped prose back into one line per paragraph.
+
+    The POS→Woo payload turns EVERY newline in Serial No.description into <br>,
+    so a description.txt wrapped at ~90 columns (text pasted from a terminal or
+    an editor with hard wrap) shows sentences cut mid-line on the store.
+
+    A block (lines between blank lines) counts as wrapped when it holds at least
+    two prose lines and one of them does not end a sentence. Inside a wrapped
+    block a prose line is glued onto the previous one with a space, except:
+    "Key: value" spec lines and bare headings ("Specifications") always keep
+    their own line, and a sentence-ending line clearly shorter than the block's
+    wrap width is the end of a paragraph, so the next line starts fresh. A file
+    already written one paragraph per line comes back unchanged.
+    # lazy: pure heuristics; a paragraph whose every wrapped line ends in a
+    # period is left alone, and a 1–3 word line with no punctuation is taken for
+    # a heading. Add an explicit marker to the file format if either bites."""
+    def own_line(l):
+        return KV_RE.match(l) or HEADING_RE.match(l)
+
+    out = []
+    for block in re.split(r"\n[ \t]*\n", body):
+        lines = [l.strip() for l in block.split("\n")]
+        prose = [l for l in lines if l and not own_line(l)]
+        wrapped = len(prose) >= 2 and any(not l.endswith(SENTENCE_END) for l in prose)
+        width = max((len(l) for l in prose), default=0)
+        merged, last = [], ""   # last = the previous ORIGINAL line, pre-merge
+        for l in lines:
+            glue = (wrapped and merged and l and last
+                    and not own_line(l) and not own_line(last)
+                    and not (last.endswith(SENTENCE_END) and len(last) < 0.7 * width))
+            if glue:
+                merged[-1] += " " + l
+            else:
+                merged.append(l)
+            last = l
+        out.append("\n".join(merged))
+    return "\n\n".join(out)
 
 
 def resize(src, dst):

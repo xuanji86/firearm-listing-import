@@ -13,7 +13,7 @@ Writes each gun's photos and description from a local `with pictures` folder ont
 
 **Title line:** the `Title:` value becomes the gun's own WooCommerce product title. `attach` writes it to `Serial No.item_name` (the Woo payload falls back to the shared `Item.item_name` model name only when empty; see `references/internals.md`). Without it, `item_name` is left alone, the product keeps the model name, and `resolve` flags `NO-TITLE`.
 
-**Description file format** (`description.txt`, UTF-8). One `Title:` line is the only structure the tool parses; everything else is free text, written to the product description verbatim (newlines preserved). Photos sit next to it in the same folder.
+**Description file format** (`description.txt`, UTF-8). One `Title:` line is the only structure the tool parses; everything else is free text written to the product description. Blank lines separate paragraphs and `Key: value` lines stay one per line; hard-wrapped prose (a paragraph cut into ~90-column lines, e.g. pasted from a terminal) is merged back into one line per paragraph, because the store renders every remaining newline as a line break. Photos sit next to it in the same folder.
 
 ```
 <one or two paragraphs written for the buyer>
