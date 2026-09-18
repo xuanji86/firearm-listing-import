@@ -38,7 +38,7 @@ Condition: Very good
 
 class UnwrapParagraphs(unittest.TestCase):
     def test_wrapped_prose_becomes_one_line_per_paragraph(self):
-        title, body = M.split_title(WRAPPED)
+        title, _flags, body, _bad = M.split_desc(WRAPPED)
         self.assertEqual(title, "Egyptian Contract FN-49 8mm Mauser Crown Marked")
         paras = body.split("\n\n")
         self.assertEqual(len(paras), 4)
@@ -59,7 +59,7 @@ class UnwrapParagraphs(unittest.TestCase):
         ])
 
     def test_flat_file_is_unchanged(self):
-        title, body = M.split_title(FLAT)
+        title, _flags, body, _bad = M.split_desc(FLAT)
         self.assertEqual(title, "Some Gun")
         self.assertEqual(body, FLAT.replace("Title: Some Gun\n", "").strip())
 
@@ -74,3 +74,57 @@ class UnwrapParagraphs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CA_FLAGS = """CA Legal: Yes
+Compliant Service: No
+Title: Type 56 SKS 7.62x39
+
+A clean Chinese SKS with matching numbers.
+"""
+
+
+class CaComplianceFlags(unittest.TestCase):
+    """'CA Legal:' / 'Compliant Service:' answer the osa_ca_compliant fields on the
+    Serial No. A parsed answer leaves the description (the store renders it from the
+    field); anything that is not Yes/No stays in the prose and is reported, because a
+    line that silently vanished would read as an answered gun."""
+
+    def test_flags_are_parsed_and_removed_from_the_body(self):
+        title, flags, body, bad = M.split_desc(CA_FLAGS)
+        self.assertEqual(flags, {"osa_ca_legal": "Yes", "osa_compliant_service": "No"})
+        self.assertEqual(title, "Type 56 SKS 7.62x39")
+        self.assertNotIn("CA Legal", body)
+        self.assertNotIn("Compliant Service", body)
+        self.assertIn("matching numbers", body)
+        self.assertEqual(bad, [])
+
+    def test_case_and_spacing_are_forgiving(self):
+        _t, flags, _b, _bad = M.split_desc("ca legal:yes\nCOMPLIANT SERVICE :  No\n")
+        self.assertEqual(flags, {"osa_ca_legal": "Yes", "osa_compliant_service": "No"})
+
+    def test_anywhere_in_the_file_not_just_the_top(self):
+        _t, flags, _b, _bad = M.split_desc("Prose first.\n\nSpecifications\nCA Legal: No\n")
+        self.assertEqual(flags, {"osa_ca_legal": "No"})
+
+    def test_absent_lines_mean_no_write(self):
+        """An unanswered file must not blank a counter-entered answer."""
+        _t, flags, _b, bad = M.split_desc("Title: Something\n\nJust prose.\n")
+        self.assertEqual(flags, {})
+        self.assertEqual(bad, [])
+
+    def test_a_bad_value_is_kept_as_prose_and_reported(self):
+        _t, flags, body, bad = M.split_desc("CA Legal: maybe\n\nProse.\n")
+        self.assertEqual(flags, {})
+        self.assertEqual(bad, ["CA Legal: maybe"])
+        self.assertIn("CA Legal: maybe", body)
+
+    def test_first_answer_of_each_kind_wins(self):
+        _t, flags, _b, _bad = M.split_desc("CA Legal: Yes\nCA Legal: No\n")
+        self.assertEqual(flags, {"osa_ca_legal": "Yes"})
+
+    def test_prose_mentioning_california_is_not_a_flag(self):
+        _t, flags, body, bad = M.split_desc("This rifle is CA legal in most configurations.\n")
+        self.assertEqual(flags, {})
+        self.assertEqual(bad, [])
+        self.assertIn("CA legal in most", body)

@@ -23,6 +23,26 @@ So `attach` sets it from the description's `Title:` line, and `settitle` sets it
 Find serials for an item: `firearms_in_stock` report or
 `frappe_list_documents("Serial No", filters=[["item_code","=",CODE]])`.
 
+## CA compliance flags (`osa_ca_compliant` extension)
+
+`osa_ca_legal` and `osa_compliant_service` are **Select** fields (`""` / `Yes` / `No`) the
+`osa_ca_compliant` POS extension adds to **both** `Item` and `Serial No` — ordinary fields,
+so `attach` writes them in the same REST PUT as the description; there is no endpoint of its
+own to call.
+
+- **Resolution is serial-first, per field**: a non-blank Serial No answer wins, a blank one
+  inherits the parent Item's. Blank in both places means *nobody has said*, which is a third
+  state distinct from `No` and is published as neither. This is why `attach` only sends a key
+  the description file actually answered — writing `""` over a counter-entered answer would
+  look like a parse and read as a downgrade.
+- The extension contributes both values to every WooCommerce product push as `_osa_ca_legal`
+  and `_osa_compliant_service` (core hooks `gunshop_woo_product_meta` /
+  `gunshop_woo_product_meta_keys`, core ≥ 1.2), and ffl-core renders them in OSA Catalog
+  Details. Nothing in this skill talks to WooCommerce about them.
+- **If the extension is not installed on the site**, Frappe rejects an unknown fieldname:
+  `attach` on a folder whose description answers a flag fails for that gun with the REST
+  error. Install `osa_ca_compliant` first, or drop the lines.
+
 ## File upload over REST (why not the MCP)
 
 The MCP can't carry image bytes — base64-ing photos through tool calls explodes
