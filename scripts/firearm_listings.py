@@ -114,6 +114,20 @@ ALLOW_PROD_ENV = "FIREARM_ALLOW_PROD"
 # Per-gun WooCommerce title: a "Title: ..." line in the description .txt (colon may
 # have no following space; matched anywhere, line-anchored, case-insensitive).
 TITLE_RE = re.compile(r"\s*title\s*:\s*(.+?)\s*$", re.I)
+# California compliance answers, read onto the Serial No fields the osa_ca_compliant
+# POS extension owns. Same shape as Title: one line, colon, Yes or No — written at the
+# top of the file by convention, matched anywhere so a file that puts them in the
+# Specifications block still works. A line that parses is removed from the customer-
+# facing description (the store renders the answers from the fields, not the prose);
+# a line whose value is neither Yes nor No is LEFT IN PLACE as ordinary text and
+# reported, because silently dropping a line nobody parsed is how a typo becomes
+# an unanswered gun.
+FLAG_FIELDS = {
+    "ca legal": "osa_ca_legal",
+    "compliant service": "osa_compliant_service",
+}
+FLAG_RE = re.compile(r"\s*(ca legal|compliant service)\s*:\s*(.+?)\s*$", re.I)
+FLAG_VALUES = {"yes": "Yes", "no": "No"}
 # A "Key: value" spec line (Manufacturer: ..., Country of origin: ...). Never
 # merged with its neighbours by unwrap_paragraphs — each one is its own line on
 # the store. Key = 1–3 capitalised-start words, so wrapped prose that happens to
@@ -263,29 +277,48 @@ def pick_desc(fp):
     return os.path.join(fp, txts[0])
 
 
-def split_title(text):
-    """(title, body) for a description .txt.
+def split_desc(text):
+    """(title, flags, body) for a description .txt.
 
     title = the value of the first 'Title:' line (the per-gun WooCommerce listing
-    title), or None if the file has no such line. body = the text with that line
-    removed so the title isn't duplicated inside the product description. Other
-    lines (incl. the rest of the Specifications block) are kept verbatim."""
-    title, kept = None, []
+    title), or None if the file has no such line.
+    flags = {POS fieldname: "Yes"|"No"} from the first 'CA Legal:' / 'Compliant
+    Service:' line of each kind; absent keys mean the file said nothing and the
+    gun's existing answer must be left alone.
+    body = the text with those lines removed so they aren't duplicated inside the
+    product description. Other lines (incl. the rest of the Specifications block)
+    are kept verbatim.
+
+    A malformed flag value ("CA Legal: maybe") is not a flag: the line stays in the
+    body and the caller reports it, rather than quietly dropping a line that looked
+    parsed but wasn't."""
+    title, flags, bad, kept = None, {}, [], []
     for line in text.splitlines():
         m = TITLE_RE.match(line)
         if title is None and m and m.group(1).strip():
             title = m.group(1).strip()
             continue  # drop the Title: line from the customer-facing description
+        m = FLAG_RE.match(line)
+        if m:
+            field = FLAG_FIELDS[m.group(1).lower()]
+            value = FLAG_VALUES.get(m.group(2).strip().lower())
+            if value and field not in flags:
+                flags[field] = value
+                continue  # answered — the store shows it as a field, not as prose
+            if not value:
+                bad.append(line.strip())
         kept.append(line)
-    return title, unwrap_paragraphs("\n".join(kept).strip())
+    return title, flags, unwrap_paragraphs("\n".join(kept).strip()), bad
 
 
 def read_desc(desc_path):
-    """(title, body) from a description file path; (None, "") when path is None.
-    Thin path->text bridge for cmd_resolve/cmd_attach over split_title()."""
+    """(title, flags, body, bad_flag_lines) from a description file path.
+
+    (None, {}, "", []) when path is None. Thin path->text bridge for
+    cmd_resolve/cmd_attach over split_desc()."""
     if not desc_path:
-        return None, ""
-    return split_title(open(desc_path, encoding="utf-8", errors="replace").read())
+        return None, {}, "", []
+    return split_desc(open(desc_path, encoding="utf-8", errors="replace").read())
 
 
 def unwrap_paragraphs(body):
@@ -405,9 +438,16 @@ def cmd_resolve(args):
         if not desc_path:
             flags.append("NO-DESC")
         else:
-            title, _ = read_desc(desc_path)
+            title, ca_flags, _, bad_flags = read_desc(desc_path)
             if not title:
                 flags.append("NO-TITLE")  # no 'Title:' line — Woo falls back to the shared Item name
+            # Surface compliance answers here so a run can be checked before it writes:
+            # CA=Yes/No (what will be set), BAD-FLAG (a line that looked like an answer
+            # but wasn't one — it stays in the description and nothing is written).
+            for field, value in ca_flags.items():
+                flags.append(("CA" if field == "osa_ca_legal" else "SVC") + "=" + value)
+            if bad_flags:
+                flags.append("BAD-FLAG")
         print(f"{f:<14}{(serial or '?'):<14}{str(status):<10}{str(price):<8}{len(imgs):<5}{primary:<22}{' '.join(flags):<26}{title or ''}")
     shared = {ic: ss for ic, ss in seen_items.items() if len(ss) > 1}
     if shared:
@@ -432,7 +472,7 @@ def cmd_attach(args):
             if d.get("image_gallery") and not args.force:
                 print(f"[{f} -> {serial}] SKIP — already has gallery (use --force)"); continue
             desc_path = pick_desc(fp)
-            title, description = read_desc(desc_path)
+            title, ca_flags, description, bad_flags = read_desc(desc_path)
             # item_name = the per-gun WooCommerce title (see references/internals.md):
             # serial_to_product_payload uses Serial No.item_name, falling back to the
             # shared Item name. Only send it when a 'Title:' line is present so we never
@@ -440,11 +480,19 @@ def cmd_attach(args):
             title_field = {"item_name": title} if title else {}
             if not title:
                 print(f"  [{f} -> {serial}] NO-TITLE — no 'Title:' line; Woo keeps the shared Item name")
+            # CA Legal / Compliant Service (osa_ca_compliant extension). Only sent when
+            # the file answered: an absent line means "not stated here", and overwriting
+            # a counter-entered answer with a blank would be a silent downgrade. A gun
+            # left unanswered here still inherits its Item's answer in the POS.
+            for line in bad_flags:
+                print(f"  [{f} -> {serial}] BAD-FLAG — {line!r} is not Yes/No; left in the description, nothing written")
+            if ca_flags:
+                print(f"  [{f} -> {serial}] flags: " + ", ".join(f"{k}={v}" for k, v in sorted(ca_flags.items())))
             imgs = list_images(fp)
             if not imgs:
                 # No photos: set description (+ title) only — never blank out an existing image/gallery.
                 requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
-                             data=json.dumps({"description": description, **title_field}), timeout=120).raise_for_status()
+                             data=json.dumps({"description": description, **title_field, **ca_flags}), timeout=120).raise_for_status()
                 print(f"  [{f} -> {serial}] no photos — set description{' + title' if title else ''} only\n"); continue
             outdir = os.path.join(tmp, serial); os.makedirs(outdir, exist_ok=True)
             gallery, primary = [], None
@@ -458,7 +506,8 @@ def cmd_attach(args):
                 print(f"    {name} -> {url}{'  [PRIMARY]' if i == 0 else ''}")
             r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
                              data=json.dumps({"description": description, "image": primary,
-                                              "image_gallery": gallery, **title_field}), timeout=120)
+                                              "image_gallery": gallery, **title_field,
+                                              **ca_flags}), timeout=120)
             r.raise_for_status()
             print(f"  [{f} -> {serial}] set description + {len(gallery)} resized photos, primary set"
                   f"{', title=' + repr(title) if title else ''}\n")

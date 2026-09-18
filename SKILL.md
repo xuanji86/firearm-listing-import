@@ -13,9 +13,12 @@ Writes each gun's photos and description from a local `with pictures` folder ont
 
 **Title line:** the `Title:` value becomes the gun's own WooCommerce product title. `attach` writes it to `Serial No.item_name` (the Woo payload falls back to the shared `Item.item_name` model name only when empty; see `references/internals.md`). Without it, `item_name` is left alone, the product keeps the model name, and `resolve` flags `NO-TITLE`.
 
-**Description file format** (`description.txt`, UTF-8). One `Title:` line is the only structure the tool parses; everything else is free text written to the product description. Blank lines separate paragraphs and `Key: value` lines stay one per line; hard-wrapped prose (a paragraph cut into ~90-column lines, e.g. pasted from a terminal) is merged back into one line per paragraph, because the store renders every remaining newline as a line break. Photos sit next to it in the same folder.
+**Description file format** (`description.txt`, UTF-8). Three lines are structure the tool parses — `Title:`, `CA Legal:` and `Compliant Service:` — and everything else is free text written to the product description. Blank lines separate paragraphs and `Key: value` lines stay one per line; hard-wrapped prose (a paragraph cut into ~90-column lines, e.g. pasted from a terminal) is merged back into one line per paragraph, because the store renders every remaining newline as a line break. Photos sit next to it in the same folder.
 
 ```
+CA Legal: Yes
+Compliant Service: No
+
 <one or two paragraphs written for the buyer>
 
 Specifications
@@ -28,6 +31,10 @@ Action: Bolt-action
 ```
 
 - `Title:` may be on any line; case-insensitive; space after the colon optional. Only the first match is used, and that line is removed from the description.
+- `CA Legal:` and `Compliant Service:` take **`Yes` or `No`** and write the matching fields on the Serial No (the `osa_ca_compliant` POS extension owns them; the store shows them in OSA Catalog Details). Write them at the top of the file by convention — they are matched anywhere, case-insensitively, first answer of each kind wins — and a parsed line is removed from the description, because the store renders the answer as a field rather than as prose.
+  - **Leave the line out and nothing is written.** The gun keeps whatever the counter entered, and a gun with no answer of its own inherits its model's (the Item's) answer in the POS. Only answer a gun you have actually checked.
+  - A value that is not `Yes`/`No` (`CA Legal: maybe`) is not an answer: the line stays in the description as ordinary text, nothing is written, and both `resolve` and `attach` print `BAD-FLAG`.
+  - Prose that happens to mention CA legality ("this rifle is CA legal in most configurations") is not a flag — only a line that *starts* with the key is.
 - The other `Key: value` lines are not parsed; they stay as text.
 - No Markdown or HTML (it would show literally).
 - Accepted photo extensions: `.jpg .jpeg .png .webp .heic`. `main.*` is the primary; otherwise the first by filename.
