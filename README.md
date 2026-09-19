@@ -31,11 +31,14 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 
 ## Folder and description format
 
-One subfolder per gun, named after its serial number, holding `description.txt` plus the photos.
+One subfolder per gun, named after its serial number, holding `description.txt` plus the photos. The companion skill [product-description-seo](https://github.com/xuanji86/product-description-seo) writes these files in this exact shape.
 
-**Description file format** (`description.txt`, UTF-8). One `Title:` line is the only structure the tool parses; everything else is free text, written to the product description verbatim (newlines preserved). Photos sit next to it in the same folder.
+**Description file format** (`description.txt`, UTF-8). Three kinds of line are structure the tool parses — `Title:`, `CA Legal:` and `Compliant Service:` — and are removed from the customer-facing text; everything else is free text written to the product description verbatim. Hard-wrapped prose (a paragraph cut into ~90-column lines) is merged back into one line per paragraph, because the store renders every remaining newline as a line break. Photos sit next to it in the same folder.
 
 ```
+CA Legal: Yes
+Compliant Service: No
+
 <one or two paragraphs written for the buyer>
 
 Specifications
@@ -48,6 +51,7 @@ Action: Bolt-action
 ```
 
 - `Title:` may be on any line; case-insensitive; space after the colon optional. Only the first match is used, and that line is removed from the description.
+- `CA Legal:` / `Compliant Service:` take `Yes` or `No` only (case-insensitive, any line, first of each kind wins) and are written to the Serial No fields of the `osa_ca_compliant` POS extension; the store shows them as fields. A missing line leaves the gun's existing answer alone. Any other value (`CA Legal: maybe`) is not an answer: the line stays in the description as text, nothing is written, and `resolve` / `attach` print `BAD-FLAG`.
 - The other `Key: value` lines are not parsed; they stay as text.
 - No Markdown or HTML (it would show literally).
 - Accepted photo extensions: `.jpg .jpeg .png .webp .heic`. `main.*` is the primary; otherwise the first by filename.
