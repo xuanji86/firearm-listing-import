@@ -120,6 +120,30 @@ class AttachCommand(unittest.TestCase):
         self.assertNotIn("PORTRAIT", out)
         self.assertEqual(up.call_count, 2)
 
+    def test_attach_refuses_a_portrait_primary_even_with_allow_portrait(self):
+        root = self._portrait_batch()
+        os.rename(os.path.join(root, "SN123", "main.jpg"), os.path.join(root, "SN123", "zz.jpg"))
+        os.rename(os.path.join(root, "SN123", "IMG_1.jpg"), os.path.join(root, "SN123", "main.jpg"))  # portrait primary
+        with mock.patch.object(M, "resolve_serial", return_value=("SN123", "exact")), \
+             mock.patch.object(M, "get_serial", return_value={"image_gallery": []}), \
+             mock.patch.object(M, "upload") as up, \
+             mock.patch.object(M.requests, "put") as put:
+            out = _run(M.cmd_attach, _args(root, allow_portrait=True))
+        self.assertIn("MAIN-PORTRAIT", out)
+        self.assertIn("main.jpg", out)
+        up.assert_not_called()
+        put.assert_not_called()
+
+    def test_resolve_flags_a_portrait_primary(self):
+        root = self._portrait_batch()
+        os.remove(os.path.join(root, "SN123", "main.jpg"))  # only IMG_1.jpg (portrait) left -> it is the primary
+        with mock.patch.object(M, "resolve_serial", return_value=("SN123", "exact")), \
+             mock.patch.object(M, "get_serial", return_value={"status": "Active", "sell_price": 100,
+                                                              "image_gallery": [], "item_code": "X"}):
+            out = _run(M.cmd_resolve, _args(root))
+        self.assertIn("PORTRAIT:1", out)
+        self.assertIn("MAIN-PORTRAIT", out)
+
     def test_resolve_flags_portrait_photos(self):
         root = self._portrait_batch()
         with mock.patch.object(M, "resolve_serial", return_value=("SN123", "exact")), \
@@ -127,6 +151,7 @@ class AttachCommand(unittest.TestCase):
                                                               "image_gallery": [], "item_code": "X"}):
             out = _run(M.cmd_resolve, _args(root))
         self.assertIn("PORTRAIT:1", out)
+        self.assertNotIn("MAIN-PORTRAIT", out)  # main.jpg is landscape here
 
 
 if __name__ == "__main__":

@@ -16,7 +16,8 @@ Subcommands (run `resolve` first — it is read-only):
       title, taken from the description's "Title:" line). Skips serials that
       already have a gallery unless --force. A folder holding a photo taller
       than wide (after EXIF rotation) is skipped whole unless --allow-portrait:
-      the store's product grid and gallery are landscape. Resizing is mandatory
+      the store's product grid and gallery are landscape. The PRIMARY photo
+      (main.*, else first by name) must be landscape, no override. Resizing is mandatory
       (see push timeout note below).
   push    --root DIR [--map map.json] [--only A,B] [--channel woo|gunbroker]
       Publish each priced + Active + not-yet-listed serial as its own listing
@@ -448,6 +449,8 @@ def cmd_resolve(args):
         portrait = portrait_photos(fp, imgs)
         if portrait:
             flags.append(f"PORTRAIT:{len(portrait)}")  # attach refuses these without --allow-portrait
+            if imgs[0] in portrait:
+                flags.append("MAIN-PORTRAIT")  # the featured image must be landscape; attach has no override
         if not serial:
             flags.append("UNRESOLVED")
         else:
@@ -527,6 +530,11 @@ def cmd_attach(args):
                              data=json.dumps({"description": description, **title_field, **ca_flags}), timeout=120).raise_for_status()
                 print(f"  [{f} -> {serial}] no photos — set description{' + title' if title else ''} only\n"); continue
             portrait = portrait_photos(fp, imgs) or []
+            if imgs[0] in portrait:
+                # The primary becomes the Woo featured image (grid thumbnail); no override.
+                print(f"  [{f} -> {serial}] MAIN-PORTRAIT — primary photo {imgs[0]} is taller than wide; "
+                      f"the featured image must be landscape: rotate it or name another photo main.* "
+                      f"(skipped, nothing written)\n"); continue
             if portrait and not getattr(args, "allow_portrait", False):
                 # Whole gun skipped, nothing written: a listing with half its photos is
                 # worse than one that waits for the reshoot.
