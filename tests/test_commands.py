@@ -86,6 +86,48 @@ class AttachCommand(unittest.TestCase):
         # hard-wrapped prose arrives as one line per paragraph (ece8af2's intent)
         self.assertIn("chambered in 8mm Mauser. Condition is excellent.", body)
 
+    def _portrait_batch(self):
+        try:
+            from PIL import Image
+            import pillow_heif  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("Pillow/pillow-heif not installed")
+        root = _batch()
+        Image.new("RGB", (600, 1067), (5, 5, 5)).save(os.path.join(root, "SN123", "IMG_1.jpg"))
+        Image.new("RGB", (1067, 600), (5, 5, 5)).save(os.path.join(root, "SN123", "main.jpg"))
+        return root
+
+    def test_attach_skips_a_gun_with_a_portrait_photo_and_writes_nothing(self):
+        root = self._portrait_batch()
+        with mock.patch.object(M, "resolve_serial", return_value=("SN123", "exact")), \
+             mock.patch.object(M, "get_serial", return_value={"image_gallery": []}), \
+             mock.patch.object(M, "upload") as up, \
+             mock.patch.object(M.requests, "put") as put:
+            out = _run(M.cmd_attach, _args(root))
+        self.assertIn("PORTRAIT", out)
+        self.assertIn("IMG_1.jpg", out)
+        self.assertNotIn("main.jpg;", out)  # only the offending photo is named
+        up.assert_not_called()
+        put.assert_not_called()
+
+    def test_attach_allow_portrait_uploads_anyway(self):
+        root = self._portrait_batch()
+        with mock.patch.object(M, "resolve_serial", return_value=("SN123", "exact")), \
+             mock.patch.object(M, "get_serial", return_value={"image_gallery": []}), \
+             mock.patch.object(M, "upload", return_value="/files/x.jpg") as up, \
+             mock.patch.object(M.requests, "put", return_value=mock.Mock(raise_for_status=lambda: None)):
+            out = _run(M.cmd_attach, _args(root, allow_portrait=True))
+        self.assertNotIn("PORTRAIT", out)
+        self.assertEqual(up.call_count, 2)
+
+    def test_resolve_flags_portrait_photos(self):
+        root = self._portrait_batch()
+        with mock.patch.object(M, "resolve_serial", return_value=("SN123", "exact")), \
+             mock.patch.object(M, "get_serial", return_value={"status": "Active", "sell_price": 100,
+                                                              "image_gallery": [], "item_code": "X"}):
+            out = _run(M.cmd_resolve, _args(root))
+        self.assertIn("PORTRAIT:1", out)
+
 
 if __name__ == "__main__":
     unittest.main()
