@@ -22,6 +22,7 @@ A **Claude Code / Codex skill** that imports per‑gun photos + descriptions fro
 ## How it works (the short version)
 
 - Per‑gun data lives on the **Serial No** record (`image` / `image_gallery` / `description` / `item_name`), **not** the model Item (one Item backs many serials).
+- Photos taller than wide (after EXIF rotation) block `attach` for that gun (`resolve` flags `PORTRAIT:<n>`); the store's grid and gallery are landscape. Override with `--allow-portrait` — except the primary (`main.*`), which must be landscape. Whether the gun is upright in the primary photo is checked by the agent looking at it before `attach` (SKILL.md step 1b).
 - The `Title:` line of the description becomes `Serial No.item_name`, the per‑gun product name (falls back to the shared model name; `resolve` flags `NO-TITLE`).
 - Photos are **resized (~2000px/q80) before upload** — full‑size phone photos blow past the POS→Woo 30s image‑sideload timeout.
 - Listing is **per serial** via `push_serial_now` (not `woo_push_item`, which pushes every sibling under the same Item). `push --channel gunbroker` lists the same gun on GunBroker with the same photos, description and price.

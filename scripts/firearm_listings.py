@@ -10,12 +10,15 @@ ONE description .txt plus several photos. Photos go on the **Serial No** record
 Subcommands (run `resolve` first — it is read-only):
   resolve --root DIR [--map map.json]
       Read-only plan: folder -> Serial No, status, price, photo/primary, flags.
-  attach  --root DIR [--map map.json] [--only A,B] [--force]
+  attach  --root DIR [--map map.json] [--only A,B] [--force] [--allow-portrait]
       Resize photos (~2000px/q80) -> upload to POS -> set image_gallery +
       image (primary) + description + item_name (the per-gun WooCommerce listing
       title, taken from the description's "Title:" line). Skips serials that
-      already have a gallery unless --force. Resizing is mandatory (see push
-      timeout note below).
+      already have a gallery unless --force. A folder holding a photo taller
+      than wide (after EXIF rotation) is skipped whole unless --allow-portrait:
+      the store's product grid and gallery are landscape. The PRIMARY photo
+      (main.*, else first by name) must be landscape, no override. Resizing is mandatory
+      (see push timeout note below).
   push    --root DIR [--map map.json] [--only A,B] [--channel woo|gunbroker]
       Publish each priced + Active + not-yet-listed serial as its own listing
       via the channel's whitelisted push_serial_now. Skips un-priced ($0) and
@@ -370,13 +373,40 @@ def resize(src, dst):
     no detail and only grows the upload), and EXIF rotation is baked into the
     pixels (sips kept the orientation tag, so a stripped tag meant a sideways
     gun on the store)."""
-    from PIL import Image, ImageOps          # imported here so the stdlib-only
-    from pillow_heif import register_heif_opener  # test run needs no Pillow
-    register_heif_opener()  # .heic is in IMG_EXT; Pillow needs this plugin to open it
+    out = open_photo(src)
+    out.thumbnail((MAXPX, MAXPX))      # aspect kept, never upscales
+    out.convert("RGB").save(dst, "JPEG", quality=QUALITY, optimize=True)
+
+
+def open_photo(src):
+    """Open a photo as the phone meant it: EXIF rotation baked into the pixels.
+
+    Pillow is imported here so the stdlib-only test run needs no Pillow; .heic is
+    in IMG_EXT and needs the pillow-heif plugin to open."""
+    from PIL import Image, ImageOps
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
     with Image.open(src) as im:
-        out = ImageOps.exif_transpose(im)  # bake in phone rotation; the JPEG save drops EXIF
-        out.thumbnail((MAXPX, MAXPX))      # aspect kept, never upscales
-        out.convert("RGB").save(dst, "JPEG", quality=QUALITY, optimize=True)
+        return ImageOps.exif_transpose(im)  # a copy; the JPEG save later drops EXIF
+
+
+def portrait_photos(fp, imgs):
+    """Names of the photos in ``imgs`` that are taller than wide once EXIF rotation
+    is applied — the shape the store's landscape product grid and gallery crop or
+    letterbox. A phone photo that only *looks* sideways because of its orientation
+    tag is not portrait here; the transpose happens first, as it does in resize().
+    Returns None when Pillow is not installed (the check cannot run)."""
+    try:
+        import PIL  # noqa: F401
+        import pillow_heif  # noqa: F401
+    except ImportError:
+        return None
+    out = []
+    for name in imgs:
+        w, h = open_photo(os.path.join(fp, name)).size
+        if h > w:
+            out.append(name)
+    return out
 
 
 def upload(serial, path):
@@ -416,6 +446,11 @@ def cmd_resolve(args):
         primary = imgs[0] if imgs else "(none)"
         flags = []
         status = price = "-"
+        portrait = portrait_photos(fp, imgs)
+        if portrait:
+            flags.append(f"PORTRAIT:{len(portrait)}")  # attach refuses these without --allow-portrait
+            if imgs[0] in portrait:
+                flags.append("MAIN-PORTRAIT")  # the featured image must be landscape; attach has no override
         if not serial:
             flags.append("UNRESOLVED")
         else:
@@ -494,6 +529,18 @@ def cmd_attach(args):
                 requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
                              data=json.dumps({"description": description, **title_field, **ca_flags}), timeout=120).raise_for_status()
                 print(f"  [{f} -> {serial}] no photos — set description{' + title' if title else ''} only\n"); continue
+            portrait = portrait_photos(fp, imgs) or []
+            if imgs[0] in portrait:
+                # The primary becomes the Woo featured image (grid thumbnail); no override.
+                print(f"  [{f} -> {serial}] MAIN-PORTRAIT — primary photo {imgs[0]} is taller than wide; "
+                      f"the featured image must be landscape: rotate it or name another photo main.* "
+                      f"(skipped, nothing written)\n"); continue
+            if portrait and not getattr(args, "allow_portrait", False):
+                # Whole gun skipped, nothing written: a listing with half its photos is
+                # worse than one that waits for the reshoot.
+                print(f"  [{f} -> {serial}] PORTRAIT — {len(portrait)} photo(s) taller than wide: "
+                      f"{', '.join(portrait)}; rotate or reshoot them, or pass --allow-portrait "
+                      f"(skipped, nothing written)\n"); continue
             outdir = os.path.join(tmp, serial); os.makedirs(outdir, exist_ok=True)
             gallery, primary = [], None
             for i, name in enumerate(imgs):
@@ -640,6 +687,8 @@ def main():
         sp.add_argument("--only", help="comma-separated folder names to limit to")
         if name == "attach":
             sp.add_argument("--force", action="store_true", help="re-attach even if gallery exists")
+            sp.add_argument("--allow-portrait", action="store_true",
+                            help="upload photos taller than wide too (default: skip the gun and say which photos)")
         if name in ("push", "verify"):
             sp.add_argument("--channel", choices=sorted(PUSH_CHANNELS),
                             default=DEFAULT_CHANNEL,

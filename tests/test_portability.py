@@ -104,3 +104,41 @@ class Resize(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortraitCheck(unittest.TestCase):
+    """portrait_photos() gates attach: the store's grid and gallery are landscape."""
+
+    def setUp(self):
+        _pillow_or_skip()
+        self.tmp = tempfile.mkdtemp()
+
+    def _photo(self, name, size, exif_orientation=None):
+        from PIL import Image
+        im = Image.new("RGB", size, (10, 20, 30))
+        path = os.path.join(self.tmp, name)
+        if exif_orientation is None:
+            im.save(path)
+        else:
+            ex = im.getexif()
+            ex[274] = exif_orientation
+            im.save(path, exif=ex)
+        return name
+
+    def test_taller_than_wide_is_portrait(self):
+        names = [self._photo("a.jpg", (1000, 2000)), self._photo("b.jpg", (2000, 1000))]
+        self.assertEqual(M.portrait_photos(self.tmp, names), ["a.jpg"])
+
+    def test_square_is_not_portrait(self):
+        self.assertEqual(M.portrait_photos(self.tmp, [self._photo("s.jpg", (1500, 1500))]), [])
+
+    def test_exif_rotation_is_applied_before_judging(self):
+        """A landscape file tagged 'rotate 90' displays portrait — and is judged portrait;
+        a portrait file tagged 'rotate 90' displays landscape and passes."""
+        tagged_landscape = self._photo("t1.jpg", (2000, 1000), exif_orientation=6)
+        tagged_portrait = self._photo("t2.jpg", (1000, 2000), exif_orientation=6)
+        self.assertEqual(M.portrait_photos(self.tmp, [tagged_landscape, tagged_portrait]), ["t1.jpg"])
+
+    def test_no_photos_no_flags(self):
+        self.assertEqual(M.portrait_photos(self.tmp, []), [])
+

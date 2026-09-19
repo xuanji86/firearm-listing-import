@@ -44,7 +44,7 @@ The tool needs a key to log in to the POS. Generate it on the POS site and store
 - Inside each subfolder:
   - **One description file** `description.txt`. Include a line `Title: <listing title>` (usually in the `Specifications` block). That becomes the gun's own product title on the store; the tool removes the line from the description body. Without it the gun is listed under the shared model name (every gun of that model gets the same title).
   - **Photos**: `.jpg` / `.jpeg` / `.png` / `.webp` / `.heic`.
-- Name the **primary photo** (the one customers see first) **`main.jpg`** (any case). Without it, the first photo by filename is used.
+- Name the **primary photo** (the one customers see first) **`main.jpg`** (any case). Without it, the first photo by filename is used. It must be a **landscape** shot (wider than tall) with the gun the right way up — barrel level, sights on top. A vertical main photo is refused; other vertical photos are refused too unless the operator says to allow them.
 
 Example `description.txt` (the `Title:` line can be anywhere; everything else is plain text shown to the customer as-is):
 

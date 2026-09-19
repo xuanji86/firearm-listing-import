@@ -117,19 +117,31 @@ Prints per folder: folder → Serial No, status, price, photo count, primary, FL
 - `has-gallery` / `woo#<id>` — already has photos / already listed (skipped by default).
 - `NO-DESC` — no `.txt` in the folder.
 - `NO-TITLE` — no `Title:` line; the gun keeps the shared model name unless `settitle` is used.
+- `MAIN-PORTRAIT` — the primary photo itself (`main.*`, else first by name) is taller than wide. The featured image must be landscape; `attach` refuses the gun with no override. Rotate that photo or make a landscape one `main.*`.
+- `PORTRAIT:<n>` — n photos are taller than wide after EXIF rotation. The store's product grid and gallery are landscape, so `attach` skips the whole gun (nothing written) until they are rotated or reshot, or `--allow-portrait` is passed. Tell the user which photos: `attach` prints their names.
 
 Check the `TITLE` column for every gun before listing — it is the product name customers see. Present the plan to the user and get confirmation.
+
+### 1b. Look at every primary photo (you, before attach — not optional)
+
+The primary (`PRIMARY` column of `resolve`) becomes the store's featured image, and the script can only measure its shape. Before running `attach`, open each gun's primary photo with your image viewer (Read the file) and confirm the firearm is the right way up: barrel roughly horizontal, sights and the top of the receiver up, the trigger below the bore line, nothing mirrored. A gun lying muzzle-down, rotated 90°, or upside down fails.
+
+- Any failure: do not `attach` that gun. Tell the user which file and how it is wrong; they rotate it (or pick a different `main.*`) and you look again.
+- Say what you checked: `Primary photos checked: SN1 main.jpg OK, SN2 IMG_0412.jpg OK`. If you have not looked, you have not checked.
+- Batch of many? Still every one. This is the photo customers see first.
 
 ### 2. attach (writes POS: resize + upload + gallery / description / title)
 
 ```bash
-uv run scripts/firearm_listings.py attach --root "/path/..." [--map map.json] [--only SERIAL_A,SERIAL_B] [--force]
+uv run scripts/firearm_listings.py attach --root "/path/..." [--map map.json] [--only SERIAL_A,SERIAL_B] [--force] [--allow-portrait]
 ```
 
 - Photos are resized by default (~2000 px long edge, JPEG q80; smaller images untouched). Never upload originals — see "Why resize".
 - Per gun: resize → upload to POS (public File attached to the Serial No) → PUT `description` (minus the `Title:` line), `image_gallery`, `image`, and `item_name` (from `Title:`, if present).
 - A changed title only reaches Woo on the next `push`. After `attach --force` or `settitle` on a listed gun, `push` again.
 - Idempotent: serials with a gallery are skipped unless `--force`.
+- A portrait **primary** photo refuses the gun outright (`MAIN-PORTRAIT`, no override): the featured image must be landscape.
+- Other portrait photos (taller than wide once EXIF rotation is applied) skip the whole gun, nothing written, and the message names them. Genuinely vertical shots, not a rotation-tag problem — that is baked in first. Ask the user to rotate/reshoot, or pass `--allow-portrait` if they want them up as they are.
 - Canary: `--only <one serial>`, then `verify` (prints `title=…`), then the rest.
 
 ### 3. push (list on Woo, per serial)
