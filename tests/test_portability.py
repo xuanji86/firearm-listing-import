@@ -142,3 +142,64 @@ class PortraitCheck(unittest.TestCase):
     def test_no_photos_no_flags(self):
         self.assertEqual(M.portrait_photos(self.tmp, []), [])
 
+
+class RotateCommand(unittest.TestCase):
+    """rotate turns a photo clockwise in place and keeps the original as .orig."""
+
+    def setUp(self):
+        _pillow_or_skip()
+        self.tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmp, "SN1"))
+
+    def _photo(self, name, size, exif_orientation=None):
+        from PIL import Image
+        im = Image.new("RGB", size, (10, 20, 30))
+        path = os.path.join(self.tmp, "SN1", name)
+        if exif_orientation is None:
+            im.save(path)
+        else:
+            ex = im.getexif(); ex[274] = exif_orientation
+            im.save(path, exif=ex)
+        return path
+
+    def _size(self, path):
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.size
+
+    def _rotate(self, name, degrees):
+        import argparse, contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            M.cmd_rotate(argparse.Namespace(root=self.tmp, folder="SN1", file=name, degrees=degrees))
+        return out.getvalue()
+
+    def test_90_makes_a_portrait_photo_landscape_and_keeps_the_original(self):
+        path = self._photo("main.jpg", (1000, 2000))
+        out = self._rotate("main.jpg", 90)
+        self.assertEqual(self._size(path), (2000, 1000))
+        self.assertTrue(os.path.exists(path + ".orig"))
+        self.assertEqual(self._size(path + ".orig"), (1000, 2000))
+        self.assertIn("landscape", out)
+        # the backup is not an image to the importer
+        self.assertEqual(M.list_images(os.path.join(self.tmp, "SN1")), ["main.jpg"])
+
+    def test_180_keeps_the_shape(self):
+        path = self._photo("main.jpg", (2000, 1000))
+        self._rotate("main.jpg", 180)
+        self.assertEqual(self._size(path), (2000, 1000))
+
+    def test_exif_is_applied_before_turning(self):
+        """Stored landscape + 'rotate 90' tag displays portrait; one 90° turn must give landscape."""
+        path = self._photo("main.jpg", (2000, 1000), exif_orientation=6)
+        self._rotate("main.jpg", 90)
+        self.assertEqual(self._size(path), (2000, 1000))
+        self.assertEqual(M.portrait_photos(os.path.join(self.tmp, "SN1"), ["main.jpg"]), [])
+
+    def test_second_turn_does_not_overwrite_the_first_backup(self):
+        path = self._photo("main.jpg", (1000, 2000))
+        self._rotate("main.jpg", 90)
+        self._rotate("main.jpg", 90)
+        self.assertEqual(self._size(path + ".orig"), (1000, 2000))  # still the untouched original
+        self.assertEqual(self._size(path), (1000, 2000))            # two quarter turns = upside-down portrait
+

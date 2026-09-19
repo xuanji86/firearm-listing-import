@@ -24,6 +24,11 @@ Subcommands (run `resolve` first — it is read-only):
       via the channel's whitelisted push_serial_now. Skips un-priced ($0) and
       already-listed. --channel gunbroker is refused against a non-local POS
       unless FIREARM_ALLOW_PROD=1 (see "the production gate" below).
+  rotate  --root DIR --folder SERIAL --file NAME --degrees 90|180|270
+      Turn one photo clockwise, in place, EXIF rotation baked in first. The
+      original is kept next to it as NAME.orig (not an image extension, so the
+      importer ignores it). This is how the agent fixes a sideways or
+      upside-down primary after looking at it, instead of sending it back.
   verify  --root DIR [--map map.json] [--only A,B] [--channel woo|gunbroker]
       Show gallery primary integrity + that channel's listing id per serial.
   testconn
@@ -677,6 +682,40 @@ def cmd_settitle(args):
     print(f"[{serial}] item_name (Woo title) set to {args.title!r}")
 
 
+def rotate_photo(path, degrees):
+    """Rotate one photo clockwise by 90/180/270 in place; keep ``path + '.orig'``.
+
+    EXIF rotation is baked in first (open_photo), so the degrees apply to what a
+    viewer shows, not to the stored pixels. Saved as JPEG when the source is
+    .heic (Pillow cannot write it back); the .heic itself becomes the backup, so
+    the folder holds one live copy of the photo."""
+    from PIL import Image
+    turn = {90: Image.Transpose.ROTATE_270, 180: Image.Transpose.ROTATE_180,
+            270: Image.Transpose.ROTATE_90}[int(degrees)]  # PIL turns counter-clockwise
+    im = open_photo(path).transpose(turn)
+    backup = path + ".orig"
+    if not os.path.exists(backup):
+        os.replace(path, backup)
+    root, ext = os.path.splitext(path)
+    if ext.lower() == ".heic":
+        path = root + ".jpg"
+    if ext.lower() in (".jpg", ".jpeg", ".heic"):
+        im.convert("RGB").save(path, "JPEG", quality=95, optimize=True)
+    else:
+        im.save(path)
+    return path, im.size
+
+
+def cmd_rotate(args):
+    path = os.path.join(args.root, args.folder, args.file)
+    if not os.path.isfile(path):
+        sys.exit(f"no such photo: {path}")
+    new_path, (w, h) = rotate_photo(path, args.degrees)
+    shape = "landscape" if w > h else ("portrait" if h > w else "square")
+    print(f"[{args.folder}] {args.file} turned {args.degrees}° clockwise -> {os.path.basename(new_path)} "
+          f"{w}x{h} ({shape}); original kept as {args.file}.orig")
+
+
 def main():
     p = argparse.ArgumentParser(description="Attach firearm photos/descriptions and publish to Woo")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -695,6 +734,12 @@ def main():
                             help=f"sales channel (default: {DEFAULT_CHANNEL}). "
                                  f"gunbroker needs {ALLOW_PROD_ENV}=1 off a local site")
     sub.add_parser("testconn")  # bare connectivity/auth check
+    sp = sub.add_parser("rotate")
+    sp.add_argument("--root", required=True, help="folder of <serial>/ subfolders")
+    sp.add_argument("--folder", required=True, help="serial folder name, exactly as on disk")
+    sp.add_argument("--file", required=True, help="photo file name inside that folder")
+    sp.add_argument("--degrees", required=True, type=int, choices=(90, 180, 270),
+                    help="clockwise turn as seen in a viewer: 180 = upside down, 90/270 = lying on its side")
     sp = sub.add_parser("setprice")
     sp.add_argument("--serial", required=True, help="serial number (or folder name)")
     sp.add_argument("--price", required=True, type=float, help="sell price, e.g. 1234")
@@ -703,7 +748,8 @@ def main():
     sp.add_argument("--title", required=True, help="per-gun Woo listing title (Serial No.item_name)")
     args = p.parse_args()
     {"resolve": cmd_resolve, "attach": cmd_attach, "push": cmd_push, "verify": cmd_verify,
-     "testconn": cmd_testconn, "setprice": cmd_setprice, "settitle": cmd_settitle}[args.cmd](args)
+     "testconn": cmd_testconn, "setprice": cmd_setprice, "settitle": cmd_settitle,
+     "rotate": cmd_rotate}[args.cmd](args)
 
 
 if __name__ == "__main__":

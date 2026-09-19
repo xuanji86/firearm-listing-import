@@ -39,7 +39,7 @@ Action: Bolt-action
 - No Markdown or HTML (it would show literally).
 - Accepted photo extensions: `.jpg .jpeg .png .webp .heic`. `main.*` is the primary; otherwise the first by filename.
 
-**Tool:** `scripts/firearm_listings.py` with subcommands `resolve` / `attach` / `push` / `verify` / `testconn` / `setprice` / `settitle`. Credentials and target site come from `mcp/.env` (or `FIREARM_ENV`).
+**Tool:** `scripts/firearm_listings.py` with subcommands `resolve` / `rotate` / `attach` / `push` / `verify` / `testconn` / `setprice` / `settitle`. Credentials and target site come from `mcp/.env` (or `FIREARM_ENV`).
 
 **Run it with** `uv run scripts/firearm_listings.py <subcommand>` (PEP 723 inline deps; `uv` installs `requests`, `pillow`, `pillow-heif`). Never bare `python` — the system interpreter lacks `requests`.
 
@@ -117,18 +117,25 @@ Prints per folder: folder → Serial No, status, price, photo count, primary, FL
 - `has-gallery` / `woo#<id>` — already has photos / already listed (skipped by default).
 - `NO-DESC` — no `.txt` in the folder.
 - `NO-TITLE` — no `Title:` line; the gun keeps the shared model name unless `settitle` is used.
-- `MAIN-PORTRAIT` — the primary photo itself (`main.*`, else first by name) is taller than wide. The featured image must be landscape; `attach` refuses the gun with no override. Rotate that photo or make a landscape one `main.*`.
+- `MAIN-PORTRAIT` — the primary photo itself (`main.*`, else first by name) is taller than wide. The featured image must be landscape; `attach` refuses the gun with no override. Turn it with `rotate` (step 1b) or make a landscape photo `main.*`.
 - `PORTRAIT:<n>` — n photos are taller than wide after EXIF rotation. The store's product grid and gallery are landscape, so `attach` skips the whole gun (nothing written) until they are rotated or reshot, or `--allow-portrait` is passed. Tell the user which photos: `attach` prints their names.
 
 Check the `TITLE` column for every gun before listing — it is the product name customers see. Present the plan to the user and get confirmation.
 
-### 1b. Look at every primary photo (you, before attach — not optional)
+### 1b. Look at every primary photo and fix it yourself (before attach — not optional)
 
-The primary (`PRIMARY` column of `resolve`) becomes the store's featured image, and the script can only measure its shape. Before running `attach`, open each gun's primary photo with your image viewer (Read the file) and confirm the firearm is the right way up: barrel roughly horizontal, sights and the top of the receiver up, the trigger below the bore line, nothing mirrored. A gun lying muzzle-down, rotated 90°, or upside down fails.
+The primary (`PRIMARY` column of `resolve`) becomes the store's featured image. The script measures its shape; you judge its content. Before `attach`, open each gun's primary photo with your image viewer (Read the file) and check: wider than tall, barrel roughly horizontal, sights and the top of the receiver up, trigger below the bore line, nothing mirrored.
 
-- Any failure: do not `attach` that gun. Tell the user which file and how it is wrong; they rotate it (or pick a different `main.*`) and you look again.
-- Say what you checked: `Primary photos checked: SN1 main.jpg OK, SN2 IMG_0412.jpg OK`. If you have not looked, you have not checked.
-- Batch of many? Still every one. This is the photo customers see first.
+When it is wrong, turn it yourself — do not send it back to the user:
+
+```bash
+uv run scripts/firearm_listings.py rotate --root "/path/..." --folder <SERIAL> --file main.jpg --degrees 180   # upside down
+uv run scripts/firearm_listings.py rotate --root "/path/..." --folder <SERIAL> --file main.jpg --degrees 90    # lying on its side: 90 or 270, whichever brings the sights up
+```
+
+Degrees are clockwise as the viewer shows the photo, EXIF already applied. The original stays beside it as `main.jpg.orig` (ignored by the importer). Look at the result before moving on; a second turn is fine. Do the same for any other photo `resolve` flagged `PORTRAIT` when the gun in it is simply on its side. Only a photo that no rotation can fix (mirrored, cropped wrong, the wrong gun) goes back to the user, with the file name and what is wrong.
+
+Say what you did: `Primary photos checked: SN1 main.jpg OK, SN2 IMG_0412.jpg turned 90° → OK`. If you have not looked, you have not checked. Batch of many? Still every one — this is the photo customers see first.
 
 ### 2. attach (writes POS: resize + upload + gallery / description / title)
 
@@ -141,7 +148,7 @@ uv run scripts/firearm_listings.py attach --root "/path/..." [--map map.json] [-
 - A changed title only reaches Woo on the next `push`. After `attach --force` or `settitle` on a listed gun, `push` again.
 - Idempotent: serials with a gallery are skipped unless `--force`.
 - A portrait **primary** photo refuses the gun outright (`MAIN-PORTRAIT`, no override): the featured image must be landscape.
-- Other portrait photos (taller than wide once EXIF rotation is applied) skip the whole gun, nothing written, and the message names them. Genuinely vertical shots, not a rotation-tag problem — that is baked in first. Ask the user to rotate/reshoot, or pass `--allow-portrait` if they want them up as they are.
+- Other portrait photos (taller than wide once EXIF rotation is applied) skip the whole gun, nothing written, and the message names them. Genuinely vertical shots, not a rotation-tag problem — that is baked in first. Turn them with `rotate` when the gun is merely on its side (step 1b); pass `--allow-portrait` only when the user wants a genuinely vertical composition up as it is.
 - Canary: `--only <one serial>`, then `verify` (prints `title=…`), then the rest.
 
 ### 3. push (list on Woo, per serial)
