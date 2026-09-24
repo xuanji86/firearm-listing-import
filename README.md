@@ -69,6 +69,13 @@ git clone https://github.com/xuanji86/firearm-listing-import.git
 ln -sfn "$PWD/firearm-listing-import" ~/.codex/skills/firearm-listing-import
 ```
 
+Windows (PowerShell; a junction needs no admin rights):
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.codex\skills" | Out-Null
+New-Item -ItemType Junction -Force -Path "$HOME\.codex\skills\firearm-listing-import" -Target "$PWD\firearm-listing-import"
+```
+
 **2. Point it at your POS credentials.** The script reads `FRAPPE_BASE_URL` / `FRAPPE_API_KEY` / `FRAPPE_API_SECRET`. Either:
 - export `FIREARM_ENV=/path/to/gunstore-pos/mcp/.env`, **or**
 - run it from inside a gunstore‑pos checkout (the script auto‑finds `mcp/.env` by walking up).
