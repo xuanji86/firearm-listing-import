@@ -116,7 +116,7 @@ class Renewal(unittest.TestCase):
         post = mock.Mock(side_effect=OSError("connection refused"))
         with self._patched(post), self.assertRaises(SystemExit) as e:
             M._h()
-        self.assertIn("nothing was sent", str(e.exception))
+        self.assertIn("stopped before its next request", str(e.exception))
 
     def test_a_401_renews_once_and_retries_with_the_file_rewound(self):
         import io as _io, time
