@@ -278,8 +278,12 @@ def _store_tokens(auth, tok, fresh=False):
     auth["refresh_token"] = tok.get("refresh_token") or auth.get("refresh_token")
     auth["expires_at"] = time.time() + int(tok.get("expires_in") or 3600)
     path = _session_file(auth["client_id"])
-    if fresh or os.path.exists(path):
+    if fresh:  # login: the caller holds the lock
         _write_private(path, auth)
+        return
+    with _session_lock():  # a login's cleanup cannot slip between the check and the write
+        if os.path.exists(path):
+            _write_private(path, auth)
 
 
 # --- the production gate ---------------------------------------------------
@@ -773,9 +777,10 @@ def cmd_testconn(args):
 
 
 @contextlib.contextmanager
-def _login_lock():
-    """Cross-platform, stdlib: an exclusively created lock file. One left behind
-    by a crash is taken over after 30 s (a login holds it for milliseconds)."""
+def _session_lock():
+    """Guards the session files (login's save + pointer + cleanup, a renewal's
+    save). Cross-platform, stdlib: an exclusively created lock file; one left
+    behind by a crash is taken over after 30 s (holders keep it milliseconds)."""
     path = AUTH_FILE + ".lock"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     for _ in range(300):
@@ -791,7 +796,7 @@ def _login_lock():
                 continue
             time.sleep(0.1)
     else:
-        sys.exit(f"another login holds {path} — wait for it, or delete the file")
+        sys.exit(f"{path} is held by another run — wait for it, or delete the file")
     try:
         yield
     finally:
@@ -885,7 +890,7 @@ def cmd_login(args):
     if not tok.ok:
         sys.exit(f"token exchange refused (HTTP {tok.status_code}): {tok.text[:200]}")
     auth = {"base": base, "client_id": client_id, "token_endpoint": meta["token_endpoint"]}
-    with _login_lock():  # two logins finishing at once must not delete each other's session
+    with _session_lock():  # two logins finishing at once must not delete each other's session
         _store_tokens(auth, tok.json(), fresh=True)
         _write_private(AUTH_FILE, {"client_id": client_id})  # now the current session
         # Earlier sessions on this machine are superseded: drop their tokens. (They

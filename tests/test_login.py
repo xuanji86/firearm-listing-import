@@ -136,6 +136,18 @@ class Renewal(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(sent, [("Bearer old", b"jpeg"), ("Bearer new", b"jpeg")])
 
+    def test_a_login_cleanup_cannot_land_between_check_and_write(self):
+        self._save(dict(self.auth))
+        real_write = M._write_private
+
+        def write(path, data):  # the moment after the existence check passed
+            if path.endswith("c1.json"):
+                self.assertTrue(os.path.exists(M.AUTH_FILE + ".lock"), "renewal holds the lock")
+            real_write(path, data)
+        post = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
+        with self._patched(post), mock.patch.object(M, "_write_private", write):
+            M._h()
+
     def test_a_key_file_session_never_refreshes(self):
         post = mock.Mock()
         with mock.patch.object(M, "AUTH", None), mock.patch.object(M.requests, "post", post):
@@ -173,9 +185,9 @@ class LoginLock(unittest.TestCase):
         order = []
         with mock.patch.object(M, "AUTH_FILE", os.path.join(tmp, "auth.json")):
             def second():
-                with M._login_lock():
+                with M._session_lock():
                     order.append("second")
-            with M._login_lock():
+            with M._session_lock():
                 t = threading.Thread(target=second)
                 t.start()
                 t.join(0.3)
