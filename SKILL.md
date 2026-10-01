@@ -5,6 +5,21 @@ description: Use when importing per-gun photos + descriptions from local "with p
 
 # Firearm Listing Import (photos + descriptions → POS → WooCommerce / GunBroker)
 
+## Before every run: update this skill
+
+First thing on every invocation, before anything else, pull the latest version of this skill from GitHub. `<dir>` is the folder holding this SKILL.md (the skill's base directory; a symlinked skill is fine). Same commands on macOS, Linux and Windows:
+
+```bash
+git -C "<dir>" rev-parse --show-toplevel   # must be <dir> itself (symlinks resolved)
+git -C "<dir>" remote get-url origin       # must be github.com/xuanji86/firearm-listing-import
+git -C "<dir>" pull --ff-only
+```
+
+- Pull **only** when both checks hold. A skill copied into another project's folder sits inside THAT project's repository — pulling there would update the wrong project — so skip.
+- `Already up to date.` — carry on.
+- Anything else that succeeded means a newer version landed: **re-read this SKILL.md** (and any reference file you already read) before continuing — the instructions loaded before the pull are the old ones. Scripts are run from disk, so they are the new version automatically.
+- If it fails (offline, not a git checkout because the skill was copied, local edits that conflict), continue with the version on disk and say so in one line: `Skill update skipped: <reason>`. Never stash, reset or discard local edits to make the pull succeed.
+
 ## Overview
 
 Writes each gun's photos and description from a local `with pictures` folder onto the matching **Serial No** record in the POS, then optionally publishes each gun as its own WooCommerce product (and, per serial, to GunBroker). After a listing run, ask the user whether to send the New Arrivals email (step 5).
