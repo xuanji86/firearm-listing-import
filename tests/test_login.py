@@ -22,25 +22,6 @@ class _Resp:
         return self._body
 
 
-class Precedence(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.auth = os.path.join(self.tmp, "auth.json")
-
-    def test_explicit_key_file_wins_over_a_login(self):
-        open(self.auth, "w").write("{}")
-        with mock.patch.object(M, "AUTH_FILE", self.auth), \
-                mock.patch.dict(os.environ, {"FIREARM_ENV": "/k/.env"}):
-            self.assertEqual(M._find_env(), "/k/.env")
-
-    def test_a_login_wins_over_a_repo_key_file(self):
-        open(self.auth, "w").write("{}")
-        with mock.patch.object(M, "AUTH_FILE", self.auth), \
-                mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("FIREARM_ENV", None)
-            self.assertIsNone(M._find_env())
-
-
 class Renewal(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -51,35 +32,66 @@ class Renewal(unittest.TestCase):
         self.h = {"Authorization": "Bearer old"}
 
     def _patched(self, post):
-        return [mock.patch.object(M, "AUTH_FILE", self.auth_file),
-                mock.patch.object(M, "AUTH", self.auth), mock.patch.object(M, "H", self.h),
-                mock.patch.object(M.requests, "post", post)]
+        stack = contextlib.ExitStack()
+        for p in (mock.patch.object(M, "AUTH_FILE", self.auth_file),
+                  mock.patch.object(M, "AUTH", self.auth), mock.patch.object(M, "H", self.h),
+                  mock.patch.object(M.requests, "post", post)):
+            stack.enter_context(p)
+        return stack
+
+    def _save(self, auth):
+        os.makedirs(os.path.dirname(self.auth_file), exist_ok=True)
+        with open(self.auth_file, "w") as fh:
+            json.dump(auth, fh)
 
     def test_an_expiring_token_is_renewed_and_kept_private(self):
+        self._save(dict(self.auth))
         post = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
-        with contextlib_all(self._patched(post)):
+        with self._patched(post):
             self.assertEqual(M._h()["Authorization"], "Bearer new")
             M._h()  # fresh now: no second refresh
         post.assert_called_once()
         self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "refresh_token")
         self.assertEqual(self.auth["refresh_token"], "r1", "kept when the POS sends none")
-        self.assertEqual(stat.S_IMODE(os.stat(self.auth_file).st_mode), 0o600)
+        with open(self.auth_file) as fh:
+            self.assertEqual(json.load(fh)["access_token"], "new")
+        if os.name == "posix":  # Windows has no POSIX modes; the file sits in the user's profile
+            self.assertEqual(stat.S_IMODE(os.stat(self.auth_file).st_mode), 0o600)
 
     def test_a_refused_renewal_stops_with_the_login_command(self):
         post = mock.Mock(return_value=_Resp(False, status=401))
-        with contextlib_all(self._patched(post)), self.assertRaises(SystemExit) as e:
+        with self._patched(post), self.assertRaises(SystemExit) as e:
             M._h()
         self.assertIn("login https://pos.example.com", str(e.exception))
 
     def test_a_renewal_does_not_undo_a_login_to_another_store(self):
-        os.makedirs(os.path.dirname(self.auth_file))
-        with open(self.auth_file, "w") as fh:
-            json.dump({"base": "https://pos.other.com", "client_id": "c2"}, fh)
+        self._save({"base": "https://pos.other.com", "client_id": "c2"})
         post = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
-        with contextlib_all(self._patched(post)):
+        with self._patched(post):
             self.assertEqual(M._h()["Authorization"], "Bearer new")  # this batch carries on
         with open(self.auth_file) as fh:
             self.assertEqual(json.load(fh)["client_id"], "c2")
+
+    def test_a_renewal_does_not_bring_back_a_deleted_session(self):
+        post = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
+        with self._patched(post):
+            M._h()
+        self.assertFalse(os.path.exists(self.auth_file))
+
+    def test_tokens_another_process_renewed_are_taken_not_renewed_again(self):
+        import time
+        self._save({**self.auth, "access_token": "theirs", "refresh_token": "r2",
+                    "expires_at": time.time() + 3600})
+        post = mock.Mock()
+        with self._patched(post):
+            self.assertEqual(M._h()["Authorization"], "Bearer theirs")
+        post.assert_not_called()
+
+    def test_a_200_without_a_token_is_a_failed_renewal(self):
+        post = mock.Mock(return_value=_Resp(True, {}))
+        with self._patched(post), self.assertRaises(SystemExit) as e:
+            M._h()
+        self.assertIn("login https://pos.example.com", str(e.exception))
 
     def test_a_key_file_session_never_refreshes(self):
         post = mock.Mock()
@@ -135,14 +147,6 @@ class LoginFlow(unittest.TestCase):
             saved = json.load(fh)
         self.assertEqual((saved["base"], saved["client_id"], saved["access_token"]),
                          ("https://pos.example.com", "c9", "a"))
-
-
-def contextlib_all(patches):
-    import contextlib
-    stack = contextlib.ExitStack()
-    for p in patches:
-        stack.enter_context(p)
-    return stack
 
 
 if __name__ == "__main__":

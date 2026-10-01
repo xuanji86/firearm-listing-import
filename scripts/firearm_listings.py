@@ -48,8 +48,8 @@ differs from the Serial No record (case/prefix/typo, or a corrected serial).
       is kept in ~/.config/firearm-listing-import/auth.json and renews itself.
 
 Credentials + target site: FIREARM_ENV (an API-key file, FRAPPE_BASE_URL/
-API_KEY/API_SECRET — e.g. a dev site to rehearse), else the `login` session,
-else mcp/.env above this script. NOTE: production — attach/push are live writes.
+API_KEY/API_SECRET — e.g. a dev site to rehearse), else the `login` session.
+NOTE: production — attach/push are live writes.
 
 Channels: `push`/`verify` take --channel woo (default) or gunbroker. Both call a
 whitelisted method on the POS, which owns the credentials — and for GunBroker
@@ -69,7 +69,7 @@ the inline metadata below) or the repo venv `mcp/.venv/bin/python`; a bare
 # dependencies = ["requests>=2.31,<3", "pillow>=10,<13", "pillow-heif>=0.16,<1"]
 # ///
 from __future__ import annotations
-import argparse, json, os, re, sys, tempfile
+import argparse, json, os, re, sys, tempfile, time
 from urllib.parse import quote, urlparse
 
 # Windows pipes/files default to the ANSI code page in strict mode: a gun title
@@ -79,41 +79,13 @@ for _s in (sys.stdout, sys.stderr):
         _s.reconfigure(encoding="utf-8", errors="replace")
 import requests
 
-def _find_env():
-    """The API-key file, or None when this machine signs in with `login` instead.
-
-    FIREARM_ENV (an explicit key file — e.g. a dev site to rehearse against)
-    wins; then a `login` session; then mcp/.env walked up from this script
-    (realpath, so a symlinked skill still finds its repo)."""
-    if os.environ.get("FIREARM_ENV"):
-        return os.environ["FIREARM_ENV"]
-    if os.path.exists(AUTH_FILE):
-        return None
-    try:
-        return _find_env_from(os.path.dirname(os.path.realpath(__file__)))  # realpath: resolve symlinks
-    except FileNotFoundError:
-        return None
-
-
-def _find_env_from(d):
-    """Walk up from `d` looking for mcp/.env. Split out so the loop is testable."""
-    while True:
-        cand = os.path.join(d, "mcp", ".env")
-        if os.path.exists(cand):
-            return cand
-        parent = os.path.dirname(d)
-        if parent == d:  # filesystem root ("/" or "C:\\") — stop, don't spin
-            break
-        d = parent
-    raise FileNotFoundError(
-        "mcp/.env not found above script. If this skill was copied (not symlinked) "
-        "outside the repo, set FIREARM_ENV=/path/to/gunstore-pos/mcp/.env")
-
-
 # `login` keeps the signed-in session here (the POS's own OAuth: no API key).
 AUTH_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                          "firearm-listing-import", "auth.json")
-ENV = _find_env()
+# An explicit API-key file (FRAPPE_BASE_URL / FRAPPE_API_KEY / FRAPPE_API_SECRET) —
+# how you point at a dev site to rehearse. Set, it wins over the login; there is
+# no implicit file, so which POS a run writes to is never decided by the cwd.
+ENV = os.environ.get("FIREARM_ENV") or None
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 MAXPX, QUALITY = 2000, 80          # resize target: long edge px, JPEG quality
 # Sales channels `push`/`verify` can drive. Each is (whitelisted POS method,
@@ -190,8 +162,12 @@ def save_auth(auth):
 
 if ENV:
     CFG = load_cfg()
-    BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
-    H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
+    try:
+        BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
+        H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
+    except KeyError as e:
+        sys.exit(f"FIREARM_ENV={ENV} has no {e.args[0]} — fix it, or unset FIREARM_ENV "
+                 "and use `login`")
     AUTH = None
 else:
     try:
@@ -205,39 +181,54 @@ if not ENV and not AUTH:
     H = {}
 
 
+def _saved_same_session():
+    """The saved session if it is still this run's (same client), else None —
+    another store's login, a logout (file deleted) or an unreadable file."""
+    try:
+        saved = load_auth()
+    except (OSError, ValueError):
+        return None
+    return saved if isinstance(saved, dict) and saved.get("client_id") == AUTH["client_id"] else None
+
+
 def _h():
-    """Request headers, refreshing a `login` session's token shortly before it
+    """Request headers, renewing a `login` session's token shortly before it
     expires (a batch of guns can outlast one access token)."""
-    import time
-    if AUTH and AUTH.get("expires_at", 0) - time.time() < 300:
+    if not AUTH or AUTH.get("expires_at", 0) - time.time() >= 300:
+        return H
+    # Another process sharing the session may have renewed already — and if the
+    # POS rotates refresh tokens, ours is now spent. Take its tokens first.
+    saved = _saved_same_session()
+    if saved and saved.get("expires_at", 0) > AUTH.get("expires_at", 0):
+        AUTH.update(saved)
+    if AUTH.get("expires_at", 0) - time.time() < 300:
         r = requests.post(AUTH["token_endpoint"], data={
             "grant_type": "refresh_token", "refresh_token": AUTH["refresh_token"],
             "client_id": AUTH["client_id"]}, timeout=30)
-        if not r.ok:
+        try:
+            tok = r.json() if r.ok else {}
+        except ValueError:  # a 200 that is not JSON (a proxy's error page)
+            tok = {}
+        if not isinstance(tok, dict) or not tok.get("access_token"):
             sys.exit(f"POS session expired and could not be renewed (HTTP {r.status_code}) — "
                      f"run: uv run scripts/firearm_listings.py login {AUTH['base']}")
-        _store_tokens(AUTH, r.json())
-        H["Authorization"] = f"Bearer {AUTH['access_token']}"
+        _store_tokens(AUTH, tok)
+    H["Authorization"] = f"Bearer {AUTH['access_token']}"
     return H
 
 
 def _store_tokens(auth, tok, fresh=False):
-    """Keep the new tokens; on a renewal, only if the saved session is still this
-    one — a batch running in the background must not undo a `login` to another
-    store made meanwhile (it then carries on with its tokens in memory)."""
-    import time
+    """Keep the new tokens. A renewal saves them only over this same session: a
+    batch running in the background must not undo a login to another store, nor
+    bring back a session the person deleted to sign out (it carries on with the
+    tokens in memory)."""
     auth["access_token"] = tok["access_token"]
     auth["refresh_token"] = tok.get("refresh_token") or auth.get("refresh_token")
     auth["expires_at"] = time.time() + int(tok.get("expires_in") or 3600)
-    if not fresh:
-        try:
-            if load_auth().get("client_id") != auth["client_id"]:
-                return
-        except (OSError, ValueError):
-            pass
     # lazy: no lock between the check and the write; a login landing in that
     # instant is lost. Upgrade: lock the file if two sessions ever overlap for real.
-    save_auth(auth)
+    if fresh or _saved_same_session():
+        save_auth(auth)
 
 
 # --- the production gate ---------------------------------------------------
@@ -264,7 +255,7 @@ def _is_local_base(url):
 def _prod_gate_blocks(channel):
     """Refuse a GunBroker push against a non-local POS unless told otherwise.
 
-    mcp/.env points at PRODUCTION, and this script is normally driven by an
+    The signed-in POS is PRODUCTION, and this script is normally driven by an
     agent working through a folder of guns. On Woo a mistaken push publishes a
     product that can be unpublished; on GunBroker it puts a firearm up for sale
     on a public marketplace where a buyer can commit before anyone notices, and
@@ -285,7 +276,7 @@ def _prod_gate_blocks(channel):
           f"  GunBroker Settings.sandbox_mode on the POS, not by this script,\n"
           f"  so pointing at production is the whole risk.\n"
           f"\n"
-          f"  Point mcp/.env (or FIREARM_ENV) at the dev site to rehearse:\n"
+          f"  Point FIREARM_ENV at an API-key file for the dev site to rehearse:\n"
           f"      http://dev.localhost:8000\n"
           f"\n"
           f"  If you really mean production, say so explicitly:\n"
@@ -727,7 +718,7 @@ def cmd_testconn(args):
     who = r.json().get("message") if r.ok else r.text[:120]
     print(f"BASE={BASE}\nstatus={r.status_code}  logged_in_as={who}")
     print("OK" if r.ok else ("FAILED — sign in again with `login`" if AUTH
-                             else "FAILED — check FRAPPE_API_KEY/SECRET in mcp/.env"))
+                             else f"FAILED — check FRAPPE_API_KEY/SECRET in {ENV}"))
 
 
 def cmd_login(args):
@@ -761,12 +752,12 @@ def cmd_login(args):
                 self.send_response(404)
                 self.end_headers()
                 return
-            got.update(q)
-            done.set()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write("Signed in — you can close this tab.".encode())
+            got.update(q)
+            done.set()  # after the page is sent: the process may exit right away
 
         def log_message(self, *a):
             pass

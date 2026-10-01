@@ -131,7 +131,7 @@ GunBroker is an auction marketplace, a second storefront next to the website. Th
 
 ### A GunBroker-listed gun sold at the counter
 
-⚠️ Someone must end that listing. Automatic delisting on a counter sale is not built yet.
+The POS ends the listing by itself when the gun is sold at the counter, and refuses the sale if GunBroker already sold it. Check that it is gone; if it is still up:
 
 👉 **"End the GunBroker listing for serial X"**
 

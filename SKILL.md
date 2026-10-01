@@ -1,6 +1,6 @@
 ---
 name: firearm-listing-import
-description: Use when importing per-gun photos + descriptions from local "with pictures" folders (each subfolder named after a firearm serial number, holding a description .txt + photos) onto Serial No records in the POS, and/or publishing those guns to WooCommerce or GunBroker. Also covers first-time setup (signing in to the POS with `login`, connecting the gunstore-pos connector), post-listing checks in the WooCommerce admin, and asking the operator whether to send the New Arrivals email after a listing run. Includes a plain-language operator guide for non-technical users. Triggers on "attach firearm photos by serial", "update the guns from the with pictures folder", "upload serial number photos and descriptions", "push these guns to woocommerce", "list guns on the store", "set up the POS API key", "walk me through listing", "send the new arrivals email". Photos live on the Serial No (per gun), NOT the Item.
+description: Use when importing per-gun photos + descriptions from local "with pictures" folders (each subfolder named after a firearm serial number, holding a description .txt + photos) onto Serial No records in the POS, and/or publishing those guns to WooCommerce or GunBroker. Also covers first-time setup (signing in to the POS with `login`, connecting the gunstore-pos connector), post-listing checks in the WooCommerce admin, and asking the operator whether to send the New Arrivals email after a listing run. Also use to walk a non-technical operator through a listing run. Photos live on the Serial No (per gun), NOT the Item.
 ---
 
 # Firearm Listing Import (photos + descriptions → POS → WooCommerce / GunBroker)
@@ -167,7 +167,7 @@ uv run scripts/firearm_listings.py push --root "/path/..." [--map map.json] [--o
 ### 3b. push --channel gunbroker (list on GunBroker, per serial)
 
 ```bash
-# Rehearse: point mcp/.env (or FIREARM_ENV) at the local dev site
+# Rehearse: point FIREARM_ENV at an API-key file for the local dev site
 uv run scripts/firearm_listings.py push --channel gunbroker --root "/path/..." --only ONE_SERIAL
 ```
 
@@ -186,9 +186,9 @@ Then check the printed `gb_item_id` (or `verify --channel gunbroker`) and show t
 
 **Ending a listing is not in this script:** use MCP `gb_end_listing(serial_no, confirm=true)`. Read `confirmed`, not `ok`. `confirmed=false` always comes with `pending_manual` and `gb_url`: the gun can still be bought and someone must end it on the GunBroker site.
 
-Two current limitations:
+Two things to know:
 
-- **Counter sales do not auto-end GunBroker listings yet** (the `serial_channel_exit` hook lands in PR-2/PR-3). Until then, a gun sold at the counter must be ended manually with `gb_end_listing`, or it can sell twice.
+- **Counter sales end the GunBroker listing automatically**: invoice, stock-ledger and Serial No events queue the end task, and a counter sale of a gun GunBroker already sold is refused at submit. An end GunBroker does not confirm (`confirmed=false`) still needs `gb_end_listing` or a human on the site.
 - **`GUNSTORE_MCP_GUNBROKER_ACTIONS=1` is a deployment prerequisite.** `gb_push_serial` and `gb_end_listing` share this switch; without it the MCP does not register either (`gb_test_connection` / `gb_listing_status` are always present). "I don't have that tool" means this machine cannot end listings — a human must click **End Item Early** on GunBroker. An instance that can list but not end is the most dangerous configuration.
 
 Skip reasons are printed verbatim from the guard (`{"ok": false, "skipped": ..., "message": ...}`): unpriced, not Active, already listed, reserved by another channel (a Woo order exists). Retrying does not change them.

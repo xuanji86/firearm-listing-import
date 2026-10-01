@@ -15,34 +15,6 @@ import unittest
 from test_prod_gate import M  # reuses the stubbed-requests import
 
 
-class FindEnvStopsAtRoot(unittest.TestCase):
-    """`while d != "/"` never terminated on Windows: os.path.dirname("C:\\\\")
-    returns "C:\\\\", so the walk spun forever instead of raising."""
-
-    def test_raises_instead_of_spinning_when_no_env_exists(self):
-        prev = os.environ.pop("FIREARM_ENV", None)
-        try:
-            with tempfile.TemporaryDirectory() as d:
-                # Point the walk at a directory with no mcp/.env above it inside
-                # the temp tree; it must terminate at the filesystem root.
-                deep = pathlib.Path(d, "a", "b", "c")
-                deep.mkdir(parents=True)
-                with self.assertRaises(FileNotFoundError):
-                    M._find_env_from(str(deep))
-        finally:
-            if prev is not None:
-                os.environ["FIREARM_ENV"] = prev
-
-    def test_finds_env_above_the_start_dir(self):
-        with tempfile.TemporaryDirectory() as d:
-            (pathlib.Path(d) / "mcp").mkdir()
-            target = pathlib.Path(d, "mcp", ".env")
-            target.write_text("FRAPPE_BASE_URL=x\n")
-            deep = pathlib.Path(d, "scripts", "nested")
-            deep.mkdir(parents=True)
-            self.assertEqual(M._find_env_from(str(deep)), str(target))
-
-
 def _pillow_or_skip():
     try:
         import PIL  # noqa: F401
