@@ -1,6 +1,6 @@
 ---
 name: firearm-listing-import
-description: Use when importing per-gun photos + descriptions from local "with pictures" folders (each subfolder named after a firearm serial number, holding a description .txt + photos) onto Serial No records in the POS, and/or publishing those guns to WooCommerce or GunBroker. Also covers first-time setup (Frappe API key, mcp/.env), post-listing checks in the WooCommerce admin, and asking the operator whether to send the New Arrivals email after a listing run. Includes a plain-language operator guide for non-technical users. Triggers on "attach firearm photos by serial", "update the guns from the with pictures folder", "upload serial number photos and descriptions", "push these guns to woocommerce", "list guns on the store", "set up the POS API key", "walk me through listing", "send the new arrivals email". Photos live on the Serial No (per gun), NOT the Item.
+description: Use when importing per-gun photos + descriptions from local "with pictures" folders (each subfolder named after a firearm serial number, holding a description .txt + photos) onto Serial No records in the POS, and/or publishing those guns to WooCommerce or GunBroker. Also covers first-time setup (signing in to the POS with `login`, connecting the gunstore-pos connector), post-listing checks in the WooCommerce admin, and asking the operator whether to send the New Arrivals email after a listing run. Also use to walk a non-technical operator through a listing run. Photos live on the Serial No (per gun), NOT the Item.
 ---
 
 # Firearm Listing Import (photos + descriptions → POS → WooCommerce / GunBroker)
@@ -39,20 +39,22 @@ Action: Bolt-action
 - No Markdown or HTML (it would show literally).
 - Accepted photo extensions: `.jpg .jpeg .png .webp .heic`. `main.*` is the primary; otherwise the first by filename.
 
-**Tool:** `scripts/firearm_listings.py` with subcommands `resolve` / `rotate` / `attach` / `push` / `verify` / `testconn` / `setprice` / `settitle`. Credentials and target site come from `mcp/.env` (or `FIREARM_ENV`).
+**Tool:** `scripts/firearm_listings.py` with subcommands `login` / `resolve` / `rotate` / `attach` / `push` / `verify` / `testconn` / `setprice` / `settitle`.
+
+**Sign-in (once per machine, no API key):** `uv run scripts/firearm_listings.py login https://pos.oldsteelarsenal.com` (CGA: `https://pos.caligunsandammo.com`) opens the POS sign-in page; the person signs in and approves, and the session (kept in `~/.config/firearm-listing-import/`, renewed automatically) makes every write carry their own name and POS roles. `testconn` shows who is signed in. An explicit `FIREARM_ENV` API-key file still wins over the login — that is how you point at a dev site to rehearse — so an old `export FIREARM_ENV=…` left in a shell profile must be removed after switching.
 
 **Run it with** `uv run scripts/firearm_listings.py <subcommand>` (PEP 723 inline deps; `uv` installs `requests`, `pillow`, `pillow-heif`). Never bare `python` — the system interpreter lacks `requests`.
 
-> **Non-technical operator?** If the user is new, needs the API key set up, asks to be walked through, or clearly does not use a terminal: follow `references/operator-guide.md` section by section, run the commands for them, report each result in plain language, and ask before continuing.
+> **Non-technical operator?** If the user is new, needs to sign in for the first time, asks to be walked through, or clearly does not use a terminal: follow `references/operator-guide.md` section by section, run the commands for them, report each result in plain language, and ask before continuing.
 
 ## Platforms
 
 Works the same on Claude Code and Codex, on macOS / Linux / Windows (no platform-specific dependencies; image resizing uses Pillow). Two paths coexist:
 
-- **gunstore-pos MCP** — reads and small writes (`find_item`, `frappe_*`, `woo_*`, `set_serial_title`, `firearms_in_stock`, `gb_*`). Registered in the repo's `.mcp.json` (Claude Code) or `~/.codex/config.toml` (Codex). Tool-name prefix follows each client's convention.
+- **gunstore-pos MCP** — reads and small writes (`find_item`, `frappe_*`, `woo_*`, `set_serial_title`, `firearms_in_stock`, `gb_*`). It is the store's **remote connector** (no install, no key): Claude Code `claude mcp add -s user --transport http gunstore-pos https://pos.oldsteelarsenal.com/connector/full/mcp` then `/mcp` → Authenticate; Codex `codex mcp add gunstore-pos --url <same URL>` then `codex mcp login gunstore-pos`; claude.ai / Claude Desktop through the organization's connector. The exact commands for each store are on the POS page **MCP Settings**. Every call is recorded under the signed-in person in **Connector Audit Log**. Tool-name prefix follows each client's convention.
 - **Portable script** — batch photo upload, gallery build, listing. Pure Python + Frappe REST; runs on any agent.
 
-Skill discovery: Claude Code finds project skills under `.claude/skills/`; Codex reads only `~/.codex/skills/` or `~/.agents/skills/`, so symlink the skill there. The script locates `mcp/.env` via `realpath`, so symlinks work; if the skill was copied elsewhere, set `FIREARM_ENV=/path/to/gunstore-pos/mcp/.env`.
+Skill discovery: Claude Code finds skills under `~/.claude/skills/` or `.claude/skills/`; Codex reads only `~/.codex/skills/` or `~/.agents/skills/`, so symlink the skill there. The `login` session lives in the user's config directory, so a copied or symlinked skill finds it the same way.
 
 **MCP or script?**
 
@@ -84,12 +86,12 @@ Run the suite before and after touching `cmd_push`, `_is_local_base`, or `_prod_
 
 ## Safety rails
 
-1. `mcp/.env` points at **production** (`https://pos.oldsteelarsenal.com`); the Woo store is live. `attach` / `push` are customer-facing writes that are hard to undo.
+1. The signed-in POS is **production** (`testconn` prints which); the Woo store is live. `attach` / `push` are customer-facing writes that are hard to undo.
 2. Before any batch write, run `resolve` (read-only) and get the plan confirmed by the user.
 3. **Canary first:** `attach` / `push` one gun, `verify`, have the user eyeball it, then batch.
 4. `push` publishes immediately (`status=publish`). Price comes from `Serial No.sell_price`; a 0 price lists at $0.00, so the script skips unpriced guns and reports them.
 5. Batch `attach` / `push` is slow (uploads + Woo sideload). Run in the background with a log.
-6. **GunBroker is validated against the local site only.** `push --channel gunbroker` refuses any non-local POS unless `FIREARM_ALLOW_PROD=1`. A wrong Woo push can be unpublished; a wrong GunBroker push puts a real gun on a public marketplace where a buyer can commit before anyone notices, and ending a listing early requires a human on the GunBroker site. Sandbox vs live is decided solely by `GunBroker Settings.sandbox_mode` on the POS; neither the script nor the MCP can choose. Point `mcp/.env` at `http://dev.localhost:8000` to rehearse.
+6. **GunBroker is validated against the local site only.** `push --channel gunbroker` refuses any non-local POS unless `FIREARM_ALLOW_PROD=1`. A wrong Woo push can be unpublished; a wrong GunBroker push puts a real gun on a public marketplace where a buyer can commit before anyone notices, and ending a listing early requires a human on the GunBroker site. Sandbox vs live is decided solely by `GunBroker Settings.sandbox_mode` on the POS; neither the script nor the MCP can choose. Point `FIREARM_ENV` at an API-key file for `http://dev.localhost:8000` to rehearse.
 7. **The New Arrivals email goes out only after the user explicitly says "send".** It reaches every subscriber at once and cannot be recalled. If the user does not bring it up, ask — it is the last step of the listing flow, not optional.
 
 ## Data model (read this or you will write to the wrong record)
@@ -165,7 +167,7 @@ uv run scripts/firearm_listings.py push --root "/path/..." [--map map.json] [--o
 ### 3b. push --channel gunbroker (list on GunBroker, per serial)
 
 ```bash
-# Rehearse: point mcp/.env (or FIREARM_ENV) at the local dev site
+# Rehearse: point FIREARM_ENV at an API-key file for the local dev site
 uv run scripts/firearm_listings.py push --channel gunbroker --root "/path/..." --only ONE_SERIAL
 ```
 
@@ -184,9 +186,9 @@ Then check the printed `gb_item_id` (or `verify --channel gunbroker`) and show t
 
 **Ending a listing is not in this script:** use MCP `gb_end_listing(serial_no, confirm=true)`. Read `confirmed`, not `ok`. `confirmed=false` always comes with `pending_manual` and `gb_url`: the gun can still be bought and someone must end it on the GunBroker site.
 
-Two current limitations:
+Two things to know:
 
-- **Counter sales do not auto-end GunBroker listings yet** (the `serial_channel_exit` hook lands in PR-2/PR-3). Until then, a gun sold at the counter must be ended manually with `gb_end_listing`, or it can sell twice.
+- **Counter sales end the GunBroker listing automatically**: invoice, stock-ledger and Serial No events queue the end task, and a counter sale of a gun GunBroker already sold is refused at submit. An end GunBroker does not confirm (`confirmed=false`) still needs `gb_end_listing` or a human on the site.
 - **`GUNSTORE_MCP_GUNBROKER_ACTIONS=1` is a deployment prerequisite.** `gb_push_serial` and `gb_end_listing` share this switch; without it the MCP does not register either (`gb_test_connection` / `gb_listing_status` are always present). "I don't have that tool" means this machine cannot end listings — a human must click **End Item Early** on GunBroker. An instance that can list but not end is the most dangerous configuration.
 
 Skip reasons are printed verbatim from the guard (`{"ok": false, "skipped": ..., "message": ...}`): unpriced, not Active, already listed, reserved by another channel (a Woo order exists). Retrying does not change them.

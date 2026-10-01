@@ -76,13 +76,19 @@ New-Item -ItemType Directory -Force "$HOME\.codex\skills" | Out-Null
 New-Item -ItemType Junction -Force -Path "$HOME\.codex\skills\firearm-listing-import" -Target "$PWD\firearm-listing-import"
 ```
 
-**2. Point it at your POS credentials.** The script reads `FRAPPE_BASE_URL` / `FRAPPE_API_KEY` / `FRAPPE_API_SECRET`. Either:
-- export `FIREARM_ENV=/path/to/gunstore-pos/mcp/.env`, **or**
-- run it from inside a gunstore‑pos checkout (the script auto‑finds `mcp/.env` by walking up).
+**2. Sign in to the POS (once per machine, no API key).**
 
-Generate the key in Frappe Desk → **My Settings → API Access → Generate Keys** (see `references/operator-guide.md`, Part 1).
+```bash
+uv run scripts/firearm_listings.py login https://pos.oldsteelarsenal.com   # CGA: https://pos.caligunsandammo.com
+```
 
-**3. Run** with `uv` (installs the dependencies via PEP 723 inline metadata) — never bare `python` (the system interpreter has no `requests`):
+A browser opens the POS sign-in page; sign in with your own POS account and approve. The session is kept in `~/.config/firearm-listing-import/` (mode 600) and renews itself; writes carry your name and POS roles. Signing in to the other store replaces it. Needs the store's **MCP Settings** switched on (it owns the POS's OAuth sign-in).
+
+For a dev site, `FIREARM_ENV=/path/to/key.env` (`FRAPPE_BASE_URL` / `FRAPPE_API_KEY` / `FRAPPE_API_SECRET`) still works and **wins over the login** — remove an old `export FIREARM_ENV=…` from your shell profile after switching.
+
+**3. Connect the gunstore-pos MCP** (reads and single-gun writes) as the store's remote connector — the commands for Claude Code and Codex are on the POS page **MCP Settings**. Nothing to install.
+
+**4. Run** with `uv` (installs the dependencies via PEP 723 inline metadata) — never bare `python` (the system interpreter has no `requests`):
 
 ```bash
 uv run scripts/firearm_listings.py testconn
@@ -104,5 +110,5 @@ python3 -m unittest discover -s tests -v
 - `attach` / `push` / `setprice` are **live writes** to a real POS + WooCommerce store. The tool prints the target before writing, refuses fuzzy serial matches, and the runbook mandates **resolve‑first + canary** (do one, verify, then batch).
 - The New Arrivals email reaches every subscriber at once and cannot be recalled. The runbook forbids `send` without an explicit yes from the operator, and puts `preview` (read‑only) and `test --to=` (one address, no state touched) in front of it.
 - **`push --channel gunbroker` is refused against any non-local POS** unless `FIREARM_ALLOW_PROD=1` (exactly `1`; anything else fails closed). A wrong Woo push can be unpublished; a wrong GunBroker push is a real firearm on a public marketplace. The gate keys on locality only — sandbox vs live is `GunBroker Settings.sandbox_mode` on the POS, which the script cannot read or set.
-- **GunBroker MCP tools need `GUNSTORE_MCP_GUNBROKER_ACTIONS=1`** at MCP startup; `gb_push_serial` and `gb_end_listing` share that switch. An instance that can list but not end leaves sold guns on GunBroker. Automatic delisting on a counter sale is not built yet (PR-2/PR-3).
-- **No secrets in this repo** — credentials live only in your `mcp/.env` (or `FIREARM_ENV`). The operator guide shows placeholders only.
+- **GunBroker MCP write tools** (`gb_push_serial` / `gb_end_listing`) are on the remote full connector of a store whose POS has GunBroker switched on (the POS deploy follows that switch); the read-only cpa connector never has them.
+- **No secrets in this repo** — the session lives in your user config directory (or an explicit `FIREARM_ENV` key file).

@@ -43,8 +43,13 @@ Subcommands (run `resolve` first — it is read-only):
 --map is a JSON object of {folder_name: actual_serial_no} for folders whose name
 differs from the Serial No record (case/prefix/typo, or a corrected serial).
 
-Credentials + target site come from mcp/.env (FRAPPE_BASE_URL/API_KEY/API_SECRET).
-NOTE: that .env points at PRODUCTION. attach/push are live writes.
+  login URL
+      Sign in to the POS in the browser (its own OAuth) — no API key. The session
+      is kept in ~/.config/firearm-listing-import/ and renews itself.
+
+Credentials + target site: FIREARM_ENV (an API-key file, FRAPPE_BASE_URL/
+API_KEY/API_SECRET — e.g. a dev site to rehearse), else the `login` session.
+NOTE: production — attach/push are live writes.
 
 Channels: `push`/`verify` take --channel woo (default) or gunbroker. Both call a
 whitelisted method on the POS, which owns the credentials — and for GunBroker
@@ -64,7 +69,7 @@ the inline metadata below) or the repo venv `mcp/.venv/bin/python`; a bare
 # dependencies = ["requests>=2.31,<3", "pillow>=10,<13", "pillow-heif>=0.16,<1"]
 # ///
 from __future__ import annotations
-import argparse, json, os, re, sys, tempfile
+import argparse, contextlib, json, os, re, sys, tempfile, time
 from urllib.parse import quote, urlparse
 
 # Windows pipes/files default to the ANSI code page in strict mode: a gun title
@@ -74,34 +79,13 @@ for _s in (sys.stdout, sys.stderr):
         _s.reconfigure(encoding="utf-8", errors="replace")
 import requests
 
-def _find_env():
-    """Walk up from this script to the repo root (the dir containing mcp/.env).
-
-    Uses realpath so this works when the skill is invoked through a symlink
-    (e.g. Codex loading it from ~/.codex/skills/ -> the repo). Override with the
-    FIREARM_ENV env var if the layout differs (e.g. the skill was copied, not
-    symlinked, onto a machine where the repo lives elsewhere)."""
-    if os.environ.get("FIREARM_ENV"):
-        return os.environ["FIREARM_ENV"]
-    return _find_env_from(os.path.dirname(os.path.realpath(__file__)))  # realpath: resolve symlinks
-
-
-def _find_env_from(d):
-    """Walk up from `d` looking for mcp/.env. Split out so the loop is testable."""
-    while True:
-        cand = os.path.join(d, "mcp", ".env")
-        if os.path.exists(cand):
-            return cand
-        parent = os.path.dirname(d)
-        if parent == d:  # filesystem root ("/" or "C:\\") — stop, don't spin
-            break
-        d = parent
-    raise FileNotFoundError(
-        "mcp/.env not found above script. If this skill was copied (not symlinked) "
-        "outside the repo, set FIREARM_ENV=/path/to/gunstore-pos/mcp/.env")
-
-
-ENV = _find_env()
+# `login` keeps the signed-in session here (the POS's own OAuth: no API key).
+AUTH_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                         "firearm-listing-import", "auth.json")
+# An explicit API-key file (FRAPPE_BASE_URL / FRAPPE_API_KEY / FRAPPE_API_SECRET) —
+# how you point at a dev site to rehearse. Set, it wins over the login; there is
+# no implicit file, so which POS a run writes to is never decided by the cwd.
+ENV = os.environ.get("FIREARM_ENV") or None
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 MAXPX, QUALITY = 2000, 80          # resize target: long edge px, JPEG quality
 # Sales channels `push`/`verify` can drive. Each is (whitelisted POS method,
@@ -160,9 +144,146 @@ def load_cfg():
     return cfg
 
 
-CFG = load_cfg()
-BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
-H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
+def _write_private(path, data):
+    """Atomic (a write cut short leaves the old file, never half a file); mkstemp
+    creates it 0600 — sessions hold refresh tokens."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, path)
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+# Two kinds of file, so no write ever races another: AUTH_FILE says only WHICH
+# session is current (written by `login` alone); each session's tokens live in
+# their own file (renewals write only that). A batch renewing store A's tokens
+# therefore cannot undo a login to store B made meanwhile.
+def _session_file(client_id):
+    return os.path.join(os.path.dirname(AUTH_FILE), "sessions",
+                        re.sub(r"[^\w.-]", "_", client_id) + ".json")
+
+
+def load_auth():
+    """The current session, or None (never signed in, signed out, unreadable)."""
+    cid = (_read_json(AUTH_FILE) or {}).get("client_id")
+    auth = _read_json(_session_file(cid)) if isinstance(cid, str) else None
+    return auth if auth and auth.get("client_id") == cid and auth.get("access_token") else None
+
+
+if ENV:
+    CFG = load_cfg()
+    try:
+        BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
+        H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
+    except KeyError as e:
+        sys.exit(f"FIREARM_ENV={ENV} has no {e.args[0]} — fix it, or unset FIREARM_ENV "
+                 "and use `login`")
+    AUTH = None
+else:
+    AUTH = load_auth()
+    if AUTH:
+        BASE = AUTH["base"]
+        H = {"Authorization": f"Bearer {AUTH['access_token']}"}
+if not ENV and not AUTH:
+    AUTH = BASE = None
+    H = {}
+
+
+def _saved_same_session():
+    """This run's session file as saved now (a sibling process may have renewed
+    it), or None once it is gone (signed out)."""
+    return _read_json(_session_file(AUTH["client_id"]))
+
+
+# Renew this long before expiry. The first request for each gun (resolving its
+# serial) renews, so a gun's uploads and writes never straddle a renewal.
+RENEW_MARGIN = 900
+
+
+def _adopt_sibling():
+    """Take tokens another process sharing this session renewed (if the POS
+    rotates refresh tokens, ours is then spent). True if it had newer ones."""
+    saved = _saved_same_session()
+    # A different token only: after a 401 the saved copy of the refused token
+    # looks "newer" than our zeroed expiry and must not be taken back.
+    if (saved and saved.get("access_token") not in (None, "", AUTH.get("access_token"))
+            and saved.get("expires_at", 0) > AUTH.get("expires_at", 0)):
+        AUTH.update(saved)
+        return True
+    return False
+
+
+def _renew():
+    hint = f"run: uv run scripts/firearm_listings.py login {AUTH['base']}"
+    if _adopt_sibling():
+        return
+    try:
+        r = requests.post(AUTH["token_endpoint"], data={
+            "grant_type": "refresh_token", "refresh_token": AUTH["refresh_token"],
+            "client_id": AUTH["client_id"]}, timeout=30)
+    except Exception as e:  # network: stop cleanly, never read as a failed write
+        sys.exit(f"could not reach the POS to renew the session ({type(e).__name__}) — the run "
+                 "stopped before its next request; `verify` the gun it was on, then re-run")
+    try:
+        tok = r.json() if r.ok else {}
+    except ValueError:  # a 200 that is not JSON (a proxy's error page)
+        tok = {}
+    if not isinstance(tok, dict) or not tok.get("access_token"):
+        time.sleep(1)  # a sibling may have just rotated the refresh token
+        if _adopt_sibling():
+            return
+        sys.exit(f"POS session expired and could not be renewed (HTTP {r.status_code}) — {hint}")
+    _store_tokens(AUTH, tok)
+
+
+def _h():
+    """Request headers; a `login` session is renewed RENEW_MARGIN before expiry."""
+    if AUTH:
+        if AUTH.get("expires_at", 0) - time.time() < RENEW_MARGIN:
+            _renew()
+        H["Authorization"] = f"Bearer {AUTH['access_token']}"
+    return H
+
+
+def _call(method, url, headers=None, **kw):
+    """Every POS request goes through here: current auth, and one renew-and-retry
+    on 401 (the POS's clock or token lifetime can disagree with ours; a 401 means
+    the request was refused before it did anything, so the retry is safe)."""
+    send = getattr(requests, method)
+    r = send(url, headers={**_h(), **(headers or {})}, **kw)
+    if r.status_code == 401 and AUTH:
+        AUTH["expires_at"] = 0
+        for f in (kw.get("files") or {}).values():  # an upload's file was read to the end
+            if isinstance(f, tuple) and hasattr(f[1], "seek"):
+                f[1].seek(0)
+        r = send(url, headers={**_h(), **(headers or {})}, **kw)
+    return r
+
+
+def _store_tokens(auth, tok, fresh=False):
+    """Keep the new tokens in this session's own file. A renewal never creates
+    it: a session the person signed out of stays gone (the run carries on with
+    the tokens in memory)."""
+    auth["access_token"] = tok["access_token"]
+    auth["refresh_token"] = tok.get("refresh_token") or auth.get("refresh_token")
+    auth["expires_at"] = time.time() + int(tok.get("expires_in") or 3600)
+    path = _session_file(auth["client_id"])
+    if fresh:  # login: the caller holds the lock
+        _write_private(path, auth)
+        return
+    with _session_lock():  # a login's cleanup cannot slip between the check and the write
+        if os.path.exists(path):
+            _write_private(path, auth)
 
 
 # --- the production gate ---------------------------------------------------
@@ -189,7 +310,7 @@ def _is_local_base(url):
 def _prod_gate_blocks(channel):
     """Refuse a GunBroker push against a non-local POS unless told otherwise.
 
-    mcp/.env points at PRODUCTION, and this script is normally driven by an
+    The signed-in POS is PRODUCTION, and this script is normally driven by an
     agent working through a folder of guns. On Woo a mistaken push publishes a
     product that can be unpublished; on GunBroker it puts a firearm up for sale
     on a public marketplace where a buyer can commit before anyone notices, and
@@ -210,7 +331,7 @@ def _prod_gate_blocks(channel):
           f"  GunBroker Settings.sandbox_mode on the POS, not by this script,\n"
           f"  so pointing at production is the whole risk.\n"
           f"\n"
-          f"  Point mcp/.env (or FIREARM_ENV) at the dev site to rehearse:\n"
+          f"  Point FIREARM_ENV at an API-key file for the dev site to rehearse:\n"
           f"      http://dev.localhost:8000\n"
           f"\n"
           f"  If you really mean production, say so explicitly:\n"
@@ -231,7 +352,7 @@ def _res(serial):
 def _serial_names(filt):
     """GET Serial No names matching a Frappe filter; raise on HTTP/auth error so
     a 401/500 surfaces clearly instead of masquerading as UNRESOLVED."""
-    r = requests.get(f"{BASE}/api/resource/Serial No", headers=H,
+    r = _call("get", f"{BASE}/api/resource/Serial No",
                      params={"filters": json.dumps(filt),
                              "fields": json.dumps(["name"])}, timeout=30)
     r.raise_for_status()
@@ -259,7 +380,7 @@ def resolve_serial(folder, overrides):
 
 
 def get_serial(name):
-    r = requests.get(_res(name), headers=H, timeout=30)
+    r = _call("get", _res(name), timeout=30)
     r.raise_for_status()
     return r.json()["data"]
 
@@ -416,7 +537,7 @@ def portrait_photos(fp, imgs):
 
 def upload(serial, path):
     with open(path, "rb") as fh:
-        r = requests.post(f"{BASE}/api/method/upload_file", headers=H,
+        r = _call("post", f"{BASE}/api/method/upload_file",
                           files={"file": (os.path.basename(path), fh, "image/jpeg")},
                           data={"is_private": "0", "doctype": "Serial No", "docname": serial},
                           timeout=180)
@@ -531,7 +652,7 @@ def cmd_attach(args):
             imgs = list_images(fp)
             if not imgs:
                 # No photos: set description (+ title) only — never blank out an existing image/gallery.
-                requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+                _call("put", _res(serial), headers={"Content-Type": "application/json"},
                              data=json.dumps({"description": description, **title_field, **ca_flags}), timeout=120).raise_for_status()
                 print(f"  [{f} -> {serial}] no photos — set description{' + title' if title else ''} only\n"); continue
             portrait = portrait_photos(fp, imgs) or []
@@ -556,7 +677,7 @@ def cmd_attach(args):
                     primary = url
                 gallery.append({"image": url, "is_primary": 1 if i == 0 else 0, "sort_order": i, "caption": ""})
                 print(f"    {name} -> {url}{'  [PRIMARY]' if i == 0 else ''}")
-            r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+            r = _call("put", _res(serial), headers={"Content-Type": "application/json"},
                              data=json.dumps({"description": description, "image": primary,
                                               "image_gallery": gallery, **title_field,
                                               **ca_flags}), timeout=120)
@@ -602,8 +723,8 @@ def cmd_push(args):
         if d.get(id_field):
             print(f"[{serial}] SKIP — already listed ({id_field}={d[id_field]})"); continue
         try:
-            r = requests.post(f"{BASE}/api/method/{method}",
-                              headers={**H, "Content-Type": "application/json"},
+            r = _call("post", f"{BASE}/api/method/{method}",
+                              headers={"Content-Type": "application/json"},
                               data=json.dumps({"serial_no": serial}), timeout=timeout)
             if not r.ok:
                 print(f"[{serial}] HTTP {r.status_code} {r.text[:200]}"); continue
@@ -648,10 +769,142 @@ def cmd_verify(args):
 
 def cmd_testconn(args):
     """Connectivity + auth check (no MCP needed — works on any agent via shell)."""
-    r = requests.get(f"{BASE}/api/method/frappe.auth.get_logged_user", headers=H, timeout=15)
+    r = _call("get", f"{BASE}/api/method/frappe.auth.get_logged_user", timeout=15)
     who = r.json().get("message") if r.ok else r.text[:120]
     print(f"BASE={BASE}\nstatus={r.status_code}  logged_in_as={who}")
-    print("OK" if r.ok else "FAILED — check FRAPPE_API_KEY/SECRET in mcp/.env")
+    print("OK" if r.ok else ("FAILED — sign in again with `login`" if AUTH
+                             else f"FAILED — check FRAPPE_API_KEY/SECRET in {ENV}"))
+
+
+@contextlib.contextmanager
+def _session_lock():
+    """Guards the session files (login's save + pointer + cleanup, a renewal's
+    save). Cross-platform, stdlib: an exclusively created lock file; one left
+    behind by a crash is taken over after 30 s (holders keep it milliseconds)."""
+    path = AUTH_FILE + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for _ in range(300):
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(path) > 30:
+                    os.remove(path)
+                    continue
+            except OSError:
+                continue
+            time.sleep(0.1)
+    else:
+        sys.exit(f"{path} is held by another run — wait for it, or delete the file")
+    try:
+        yield
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def cmd_login(args):
+    """Sign in to the POS in the browser (its own OAuth, PKCE) — no API key.
+
+    Registers this machine as an OAuth client (dynamic registration, a loopback
+    redirect), opens the POS sign-in/approve page, and keeps the tokens in
+    its own file under the config directory (mode 600), and makes it current. Writes then carry the signed-in person's own name and
+    POS roles. Signing in to another store replaces the session."""
+    import base64, hashlib, secrets, threading, webbrowser
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlencode
+    base = args.url.rstrip("/")
+    if urlparse(base).scheme != "https" and not _is_local_base(base):
+        sys.exit("refusing a plain-http POS URL — use https://pos.<store domain>")
+    r = requests.get(f"{base}/.well-known/oauth-authorization-server", timeout=15)
+    try:
+        meta = r.json() if r.ok else {}
+    except ValueError:
+        meta = {}
+    origin = "{0.scheme}://{0.netloc}".format(urlparse(base))
+    keys = ("authorization_endpoint", "registration_endpoint", "token_endpoint")
+    if not isinstance(meta, dict) or not all(isinstance(meta.get(k), str) for k in keys):
+        sys.exit(f"{base} does not offer sign-in (HTTP {r.status_code}) — is "
+                 "MCP Settings switched on there?")
+    for k in keys:  # the code, the verifier and every refresh token go to these
+        if "{0.scheme}://{0.netloc}".format(urlparse(meta[k])) != origin:
+            sys.exit(f"{base} advertises {k}={meta[k]} — not the same https origin; refusing "
+                     "(check the proxy sends X-Forwarded-Proto and host_name is set)")
+    got, done = {}, threading.Event()
+    verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(16)
+
+    class Callback(BaseHTTPRequestHandler):
+        def do_GET(self):
+            # Threaded and keep-waiting: a browser's idle preconnect or its
+            # favicon request must not use up the one answer we wait for.
+            u = urlparse(self.path)
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if u.path != "/callback" or q.get("state") != state:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(("Signed in — you can close this tab." if q.get("code") else
+                              f"Sign-in failed ({q.get('error', 'no code')}) — see the terminal.").encode())
+            got.update(q)
+            done.set()  # after the page is sent: the process may exit right away
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Callback)
+    srv.daemon_threads = True
+    redirect = f"http://127.0.0.1:{srv.server_port}/callback"
+    reg = requests.post(meta["registration_endpoint"], json={
+        "client_name": "firearm-listing-import", "redirect_uris": [redirect],
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "token_endpoint_auth_method": "none", "scope": "all"}, timeout=15)
+    try:
+        client_id = reg.json()["client_id"] if reg.ok else None
+    except (ValueError, KeyError, TypeError):
+        client_id = None
+    if not client_id:
+        sys.exit(f"client registration refused (HTTP {reg.status_code}): {reg.text[:200]}")
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    url = meta["authorization_endpoint"] + "?" + urlencode({
+        "response_type": "code", "client_id": client_id, "redirect_uri": redirect,
+        "scope": "all", "state": state, "code_challenge": challenge,
+        "code_challenge_method": "S256"})
+    print(f"Opening the POS sign-in page. If no browser opens, visit:\n  {url}")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    webbrowser.open(url)
+    done.wait(300)  # the redirect back, or give up after 5 minutes
+    srv.shutdown()
+    srv.server_close()
+    if "code" not in got:
+        sys.exit(f"sign-in did not complete: {got.get('error') or 'no answer within 5 minutes'}")
+    tok = requests.post(meta["token_endpoint"], data={
+        "grant_type": "authorization_code", "code": got["code"], "redirect_uri": redirect,
+        "client_id": client_id, "code_verifier": verifier}, timeout=30)
+    if not tok.ok:
+        sys.exit(f"token exchange refused (HTTP {tok.status_code}): {tok.text[:200]}")
+    auth = {"base": base, "client_id": client_id, "token_endpoint": meta["token_endpoint"]}
+    with _session_lock():  # two logins finishing at once must not delete each other's session
+        _store_tokens(auth, tok.json(), fresh=True)
+        _write_private(AUTH_FILE, {"client_id": client_id})  # now the current session
+        # Earlier sessions on this machine are superseded: drop their tokens. (They
+        # cannot be revoked from here — public clients — but an admin can in the POS.)
+        sdir = os.path.dirname(_session_file(client_id))
+        for name in os.listdir(sdir):
+            if name.endswith(".json") and name != os.path.basename(_session_file(client_id)):
+                os.remove(os.path.join(sdir, name))
+    who = requests.get(f"{base}/api/method/frappe.auth.get_logged_user",
+                       headers={"Authorization": f"Bearer {auth['access_token']}"}, timeout=15)
+    print(f"Signed in to {base} as {who.json().get('message') if who.ok else '?'} "
+          f"(session kept in {AUTH_FILE})")
+    if os.environ.get("FIREARM_ENV"):
+        print("!! FIREARM_ENV is set, and it wins over this session — unset it to use the login.")
 
 
 def cmd_setprice(args):
@@ -660,7 +913,7 @@ def cmd_setprice(args):
     if not serial or how == "fuzzy":
         print(f"[{args.serial}] UNRESOLVED or ambiguous — pass an exact serial"); return
     print(f"BASE={BASE}")
-    r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+    r = _call("put", _res(serial), headers={"Content-Type": "application/json"},
                      data=json.dumps({"sell_price": args.price}), timeout=30)
     r.raise_for_status()
     print(f"[{serial}] sell_price set to {args.price}")
@@ -676,7 +929,7 @@ def cmd_settitle(args):
     if not serial or how == "fuzzy":
         print(f"[{args.serial}] UNRESOLVED or ambiguous — pass an exact serial"); return
     print(f"BASE={BASE}")
-    r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+    r = _call("put", _res(serial), headers={"Content-Type": "application/json"},
                      data=json.dumps({"item_name": args.title}), timeout=30)
     r.raise_for_status()
     print(f"[{serial}] item_name (Woo title) set to {args.title!r}")
@@ -734,6 +987,8 @@ def main():
                             help=f"sales channel (default: {DEFAULT_CHANNEL}). "
                                  f"gunbroker needs {ALLOW_PROD_ENV}=1 off a local site")
     sub.add_parser("testconn")  # bare connectivity/auth check
+    sp = sub.add_parser("login")
+    sp.add_argument("url", help="the store's POS, e.g. https://pos.oldsteelarsenal.com")
     sp = sub.add_parser("rotate")
     sp.add_argument("--root", required=True, help="folder of <serial>/ subfolders")
     sp.add_argument("--folder", required=True, help="serial folder name, exactly as on disk")
@@ -747,7 +1002,11 @@ def main():
     sp.add_argument("--serial", required=True, help="serial number (or folder name)")
     sp.add_argument("--title", required=True, help="per-gun Woo listing title (Serial No.item_name)")
     args = p.parse_args()
-    {"resolve": cmd_resolve, "attach": cmd_attach, "push": cmd_push, "verify": cmd_verify,
+    if not BASE and args.cmd not in ("login", "rotate"):
+        sys.exit("Not signed in to a POS. Run once:\n"
+                 "  uv run scripts/firearm_listings.py login https://pos.oldsteelarsenal.com\n"
+                 "(or set FIREARM_ENV to an API-key file)")
+    {"login": cmd_login, "resolve": cmd_resolve, "attach": cmd_attach, "push": cmd_push, "verify": cmd_verify,
      "testconn": cmd_testconn, "setprice": cmd_setprice, "settitle": cmd_settitle,
      "rotate": cmd_rotate}[args.cmd](args)
 
