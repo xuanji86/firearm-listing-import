@@ -121,6 +121,7 @@ class Renewal(unittest.TestCase):
     def test_a_401_renews_once_and_retries_with_the_file_rewound(self):
         import io as _io, time
         self.auth["expires_at"] = time.time() + 3600  # our clock says fresh; the POS disagrees
+        self._save(dict(self.auth))  # the normal case: the refused token is also on disk
         renew = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
         fh = _io.BytesIO(b"jpeg")
         sent = []

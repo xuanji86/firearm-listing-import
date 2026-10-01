@@ -214,7 +214,10 @@ def _adopt_sibling():
     """Take tokens another process sharing this session renewed (if the POS
     rotates refresh tokens, ours is then spent). True if it had newer ones."""
     saved = _saved_same_session()
-    if saved and saved.get("access_token") and saved.get("expires_at", 0) > AUTH.get("expires_at", 0):
+    # A different token only: after a 401 the saved copy of the refused token
+    # looks "newer" than our zeroed expiry and must not be taken back.
+    if (saved and saved.get("access_token") not in (None, "", AUTH.get("access_token"))
+            and saved.get("expires_at", 0) > AUTH.get("expires_at", 0)):
         AUTH.update(saved)
         return True
     return False
