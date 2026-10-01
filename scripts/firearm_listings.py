@@ -737,8 +737,8 @@ def cmd_login(args):
     redirect), opens the POS sign-in/approve page, and keeps the tokens in
     AUTH_FILE (mode 600). Writes then carry the signed-in person's own name and
     POS roles. Signing in to another store replaces the session."""
-    import base64, hashlib, secrets, webbrowser
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import base64, hashlib, secrets, threading, webbrowser
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlencode
     base = args.url.rstrip("/")
     if urlparse(base).scheme != "https" and not _is_local_base(base):
@@ -748,11 +748,21 @@ def cmd_login(args):
         sys.exit(f"{base} does not offer sign-in (HTTP {meta.status_code}) — is "
                  "MCP Settings switched on there?")
     meta = meta.json()
-    got = {}
+    got, done = {}, threading.Event()
+    verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(16)
 
     class Callback(BaseHTTPRequestHandler):
         def do_GET(self):
-            got.update({k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()})
+            # Threaded and keep-waiting: a browser's idle preconnect or its
+            # favicon request must not use up the one answer we wait for.
+            u = urlparse(self.path)
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if u.path != "/callback" or q.get("state") != state:
+                self.send_response(404)
+                self.end_headers()
+                return
+            got.update(q)
+            done.set()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
@@ -761,7 +771,8 @@ def cmd_login(args):
         def log_message(self, *a):
             pass
 
-    srv = HTTPServer(("127.0.0.1", 0), Callback)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Callback)
+    srv.daemon_threads = True
     redirect = f"http://127.0.0.1:{srv.server_port}/callback"
     reg = requests.post(meta["registration_endpoint"], json={
         "client_name": "firearm-listing-import", "redirect_uris": [redirect],
@@ -770,7 +781,6 @@ def cmd_login(args):
     if not reg.ok:
         sys.exit(f"client registration refused (HTTP {reg.status_code}): {reg.text[:200]}")
     client_id = reg.json()["client_id"]
-    verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(16)
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     url = meta["authorization_endpoint"] + "?" + urlencode({
@@ -778,11 +788,12 @@ def cmd_login(args):
         "scope": "all", "state": state, "code_challenge": challenge,
         "code_challenge_method": "S256"})
     print(f"Opening the POS sign-in page. If no browser opens, visit:\n  {url}")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     webbrowser.open(url)
-    srv.timeout = 300
-    srv.handle_request()  # one redirect back, or give up after 5 minutes
+    done.wait(300)  # the redirect back, or give up after 5 minutes
+    srv.shutdown()
     srv.server_close()
-    if got.get("state") != state or "code" not in got:
+    if "code" not in got:
         sys.exit(f"sign-in did not complete: {got.get('error') or 'no answer within 5 minutes'}")
     tok = requests.post(meta["token_endpoint"], data={
         "grant_type": "authorization_code", "code": got["code"], "redirect_uri": redirect,

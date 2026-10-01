@@ -2,6 +2,8 @@
 mid-batch (an access token lasts an hour; a batch of guns can outlast it)."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import stat
@@ -84,6 +86,55 @@ class Renewal(unittest.TestCase):
         with mock.patch.object(M, "AUTH", None), mock.patch.object(M.requests, "post", post):
             M._h()
         post.assert_not_called()
+
+
+class LoginFlow(unittest.TestCase):
+    """The loopback callback: an idle browser preconnect and a favicon request
+    must not use up the one answer the login waits for (codex r2)."""
+
+    def test_the_real_callback_is_awaited_past_noise(self):
+        import argparse, socket, threading, urllib.error, urllib.request
+        from urllib.parse import parse_qs, urlparse
+        meta = {"registration_endpoint": "R", "authorization_endpoint": "https://pos.example.com/auth",
+                "token_endpoint": "T"}
+
+        def get(url, **k):
+            if url.endswith("oauth-authorization-server"):
+                return _Resp(True, meta)
+            return _Resp(True, {"message": "tom@example.com"})
+
+        def post(url, **k):
+            if url == "R":
+                return _Resp(True, {"client_id": "c9"}, 201)
+            self.assertEqual(k["data"]["code"], "the-code")
+            return _Resp(True, {"access_token": "a", "refresh_token": "r", "expires_in": 3600})
+
+        def browser(url):
+            q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
+            port = urlparse(q["redirect_uri"]).port
+
+            def act():
+                idle = socket.create_connection(("127.0.0.1", port))  # preconnect, never speaks
+                for path in ("/favicon.ico", "/callback?state=wrong&code=x"):
+                    with self.assertRaises(urllib.error.HTTPError):
+                        urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+                urllib.request.urlopen(f"{q['redirect_uri']}?state={q['state']}&code=the-code",
+                                       timeout=5).read()
+                idle.close()
+            threading.Thread(target=act, daemon=True).start()
+            return True
+
+        tmp = tempfile.mkdtemp()
+        auth_file = os.path.join(tmp, "auth.json")
+        with mock.patch.object(M.requests, "get", get), mock.patch.object(M.requests, "post", post), \
+                mock.patch.object(M, "AUTH_FILE", auth_file), \
+                mock.patch("webbrowser.open", browser), \
+                contextlib.redirect_stdout(io.StringIO()):
+            M.cmd_login(argparse.Namespace(url="https://pos.example.com/"))
+        with open(auth_file) as fh:
+            saved = json.load(fh)
+        self.assertEqual((saved["base"], saved["client_id"], saved["access_token"]),
+                         ("https://pos.example.com", "c9", "a"))
 
 
 def contextlib_all(patches):
