@@ -45,7 +45,7 @@ differs from the Serial No record (case/prefix/typo, or a corrected serial).
 
   login URL
       Sign in to the POS in the browser (its own OAuth) — no API key. The session
-      is kept in ~/.config/firearm-listing-import/auth.json and renews itself.
+      is kept in ~/.config/firearm-listing-import/ and renews itself.
 
 Credentials + target site: FIREARM_ENV (an API-key file, FRAPPE_BASE_URL/
 API_KEY/API_SECRET — e.g. a dev site to rehearse), else the `login` session.
@@ -144,20 +144,40 @@ def load_cfg():
     return cfg
 
 
-def load_auth():
-    with open(AUTH_FILE, encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def save_auth(auth):
-    """Atomic: a write cut short must not leave a half file that locks out even
-    `login`. mkstemp creates the file 0600 — it holds a refresh token."""
-    d = os.path.dirname(AUTH_FILE)
+def _write_private(path, data):
+    """Atomic (a write cut short leaves the old file, never half a file); mkstemp
+    creates it 0600 — sessions hold refresh tokens."""
+    d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".auth-")
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(auth, fh)
-    os.replace(tmp, AUTH_FILE)
+        json.dump(data, fh)
+    os.replace(tmp, path)
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+# Two kinds of file, so no write ever races another: AUTH_FILE says only WHICH
+# session is current (written by `login` alone); each session's tokens live in
+# their own file (renewals write only that). A batch renewing store A's tokens
+# therefore cannot undo a login to store B made meanwhile.
+def _session_file(client_id):
+    return os.path.join(os.path.dirname(AUTH_FILE), "sessions",
+                        re.sub(r"[^\w.-]", "_", client_id) + ".json")
+
+
+def load_auth():
+    """The current session, or None (never signed in, signed out, unreadable)."""
+    cid = (_read_json(AUTH_FILE) or {}).get("client_id")
+    auth = _read_json(_session_file(cid)) if isinstance(cid, str) else None
+    return auth if auth and auth.get("client_id") == cid and auth.get("access_token") else None
 
 
 if ENV:
@@ -170,25 +190,19 @@ if ENV:
                  "and use `login`")
     AUTH = None
 else:
-    try:
-        AUTH = load_auth() if os.path.exists(AUTH_FILE) else None
+    AUTH = load_auth()
+    if AUTH:
         BASE = AUTH["base"]
         H = {"Authorization": f"Bearer {AUTH['access_token']}"}
-    except (ValueError, KeyError, TypeError, OSError):  # none, or unreadable: `login` again
-        AUTH = None
 if not ENV and not AUTH:
     AUTH = BASE = None
     H = {}
 
 
 def _saved_same_session():
-    """The saved session if it is still this run's (same client), else None —
-    another store's login, a logout (file deleted) or an unreadable file."""
-    try:
-        saved = load_auth()
-    except (OSError, ValueError):
-        return None
-    return saved if isinstance(saved, dict) and saved.get("client_id") == AUTH["client_id"] else None
+    """This run's session file as saved now (a sibling process may have renewed
+    it), or None once it is gone (signed out)."""
+    return _read_json(_session_file(AUTH["client_id"]))
 
 
 def _h():
@@ -218,17 +232,15 @@ def _h():
 
 
 def _store_tokens(auth, tok, fresh=False):
-    """Keep the new tokens. A renewal saves them only over this same session: a
-    batch running in the background must not undo a login to another store, nor
-    bring back a session the person deleted to sign out (it carries on with the
-    tokens in memory)."""
+    """Keep the new tokens in this session's own file. A renewal never creates
+    it: a session the person signed out of stays gone (the run carries on with
+    the tokens in memory)."""
     auth["access_token"] = tok["access_token"]
     auth["refresh_token"] = tok.get("refresh_token") or auth.get("refresh_token")
     auth["expires_at"] = time.time() + int(tok.get("expires_in") or 3600)
-    # lazy: no lock between the check and the write; a login landing in that
-    # instant is lost. Upgrade: lock the file if two sessions ever overlap for real.
-    if fresh or _saved_same_session():
-        save_auth(auth)
+    path = _session_file(auth["client_id"])
+    if fresh or os.path.exists(path):
+        _write_private(path, auth)
 
 
 # --- the production gate ---------------------------------------------------
@@ -726,7 +738,7 @@ def cmd_login(args):
 
     Registers this machine as an OAuth client (dynamic registration, a loopback
     redirect), opens the POS sign-in/approve page, and keeps the tokens in
-    AUTH_FILE (mode 600). Writes then carry the signed-in person's own name and
+    its own file under the config directory (mode 600), and makes it current. Writes then carry the signed-in person's own name and
     POS roles. Signing in to another store replaces the session."""
     import base64, hashlib, secrets, threading, webbrowser
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -793,6 +805,7 @@ def cmd_login(args):
         sys.exit(f"token exchange refused (HTTP {tok.status_code}): {tok.text[:200]}")
     auth = {"base": base, "client_id": client_id, "token_endpoint": meta["token_endpoint"]}
     _store_tokens(auth, tok.json(), fresh=True)
+    _write_private(AUTH_FILE, {"client_id": client_id})  # now the current session
     who = requests.get(f"{base}/api/method/frappe.auth.get_logged_user",
                        headers={"Authorization": f"Bearer {auth['access_token']}"}, timeout=15)
     print(f"Signed in to {base} as {who.json().get('message') if who.ok else '?'} "

@@ -82,7 +82,7 @@ New-Item -ItemType Junction -Force -Path "$HOME\.codex\skills\firearm-listing-im
 uv run scripts/firearm_listings.py login https://pos.oldsteelarsenal.com   # CGA: https://pos.caligunsandammo.com
 ```
 
-A browser opens the POS sign-in page; sign in with your own POS account and approve. The session is kept in `~/.config/firearm-listing-import/auth.json` (mode 600) and renews itself; writes carry your name and POS roles. Signing in to the other store replaces it. Needs the store's **MCP Settings** switched on (it owns the POS's OAuth sign-in).
+A browser opens the POS sign-in page; sign in with your own POS account and approve. The session is kept in `~/.config/firearm-listing-import/` (mode 600) and renews itself; writes carry your name and POS roles. Signing in to the other store replaces it. Needs the store's **MCP Settings** switched on (it owns the POS's OAuth sign-in).
 
 For a dev site, `FIREARM_ENV=/path/to/key.env` (`FRAPPE_BASE_URL` / `FRAPPE_API_KEY` / `FRAPPE_API_SECRET`) still works and **wins over the login** — remove an old `export FIREARM_ENV=…` from your shell profile after switching.
 

@@ -41,7 +41,7 @@ Action: Bolt-action
 
 **Tool:** `scripts/firearm_listings.py` with subcommands `login` / `resolve` / `rotate` / `attach` / `push` / `verify` / `testconn` / `setprice` / `settitle`.
 
-**Sign-in (once per machine, no API key):** `uv run scripts/firearm_listings.py login https://pos.oldsteelarsenal.com` (CGA: `https://pos.caligunsandammo.com`) opens the POS sign-in page; the person signs in and approves, and the session (kept in `~/.config/firearm-listing-import/auth.json`, renewed automatically) makes every write carry their own name and POS roles. `testconn` shows who is signed in. An explicit `FIREARM_ENV` API-key file still wins over the login — that is how you point at a dev site to rehearse — so an old `export FIREARM_ENV=…` left in a shell profile must be removed after switching.
+**Sign-in (once per machine, no API key):** `uv run scripts/firearm_listings.py login https://pos.oldsteelarsenal.com` (CGA: `https://pos.caligunsandammo.com`) opens the POS sign-in page; the person signs in and approves, and the session (kept in `~/.config/firearm-listing-import/`, renewed automatically) makes every write carry their own name and POS roles. `testconn` shows who is signed in. An explicit `FIREARM_ENV` API-key file still wins over the login — that is how you point at a dev site to rehearse — so an old `export FIREARM_ENV=…` left in a shell profile must be removed after switching.
 
 **Run it with** `uv run scripts/firearm_listings.py <subcommand>` (PEP 723 inline deps; `uv` installs `requests`, `pillow`, `pillow-heif`). Never bare `python` — the system interpreter lacks `requests`.
 

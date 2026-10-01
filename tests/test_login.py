@@ -39,10 +39,15 @@ class Renewal(unittest.TestCase):
             stack.enter_context(p)
         return stack
 
-    def _save(self, auth):
-        os.makedirs(os.path.dirname(self.auth_file), exist_ok=True)
-        with open(self.auth_file, "w") as fh:
-            json.dump(auth, fh)
+    def _save(self, auth, current=True):
+        with mock.patch.object(M, "AUTH_FILE", self.auth_file):
+            M._write_private(M._session_file(auth["client_id"]), auth)
+            if current:
+                M._write_private(self.auth_file, {"client_id": auth["client_id"]})
+
+    def _saved(self, client_id):
+        with mock.patch.object(M, "AUTH_FILE", self.auth_file):
+            return M._read_json(M._session_file(client_id))
 
     def test_an_expiring_token_is_renewed_and_kept_private(self):
         self._save(dict(self.auth))
@@ -53,10 +58,11 @@ class Renewal(unittest.TestCase):
         post.assert_called_once()
         self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "refresh_token")
         self.assertEqual(self.auth["refresh_token"], "r1", "kept when the POS sends none")
-        with open(self.auth_file) as fh:
-            self.assertEqual(json.load(fh)["access_token"], "new")
+        self.assertEqual(self._saved("c1")["access_token"], "new")
         if os.name == "posix":  # Windows has no POSIX modes; the file sits in the user's profile
-            self.assertEqual(stat.S_IMODE(os.stat(self.auth_file).st_mode), 0o600)
+            with mock.patch.object(M, "AUTH_FILE", self.auth_file):
+                mode = os.stat(M._session_file("c1")).st_mode
+            self.assertEqual(stat.S_IMODE(mode), 0o600)
 
     def test_a_refused_renewal_stops_with_the_login_command(self):
         post = mock.Mock(return_value=_Resp(False, status=401))
@@ -65,18 +71,20 @@ class Renewal(unittest.TestCase):
         self.assertIn("login https://pos.example.com", str(e.exception))
 
     def test_a_renewal_does_not_undo_a_login_to_another_store(self):
-        self._save({"base": "https://pos.other.com", "client_id": "c2"})
+        self._save(dict(self.auth), current=False)  # this batch's session (store A)
+        self._save({"base": "https://pos.other.com", "client_id": "c2", "access_token": "b"})
         post = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
         with self._patched(post):
             self.assertEqual(M._h()["Authorization"], "Bearer new")  # this batch carries on
         with open(self.auth_file) as fh:
-            self.assertEqual(json.load(fh)["client_id"], "c2")
+            self.assertEqual(json.load(fh)["client_id"], "c2", "store B stays current")
+        self.assertEqual(self._saved("c1")["access_token"], "new")
 
     def test_a_renewal_does_not_bring_back_a_deleted_session(self):
         post = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
         with self._patched(post):
             M._h()
-        self.assertFalse(os.path.exists(self.auth_file))
+        self.assertIsNone(self._saved("c1"))
 
     def test_tokens_another_process_renewed_are_taken_not_renewed_again(self):
         import time
@@ -143,8 +151,8 @@ class LoginFlow(unittest.TestCase):
                 mock.patch("webbrowser.open", browser), \
                 contextlib.redirect_stdout(io.StringIO()):
             M.cmd_login(argparse.Namespace(url="https://pos.example.com/"))
-        with open(auth_file) as fh:
-            saved = json.load(fh)
+        with mock.patch.object(M, "AUTH_FILE", auth_file):
+            saved = M.load_auth()
         self.assertEqual((saved["base"], saved["client_id"], saved["access_token"]),
                          ("https://pos.example.com", "c9", "a"))
 
