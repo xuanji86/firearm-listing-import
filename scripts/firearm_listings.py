@@ -178,10 +178,14 @@ def load_auth():
 
 
 def save_auth(auth):
-    os.makedirs(os.path.dirname(AUTH_FILE), exist_ok=True)
-    fd = os.open(AUTH_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # holds a refresh token
+    """Atomic: a write cut short must not leave a half file that locks out even
+    `login`. mkstemp creates the file 0600 — it holds a refresh token."""
+    d = os.path.dirname(AUTH_FILE)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".auth-")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(auth, fh)
+    os.replace(tmp, AUTH_FILE)
 
 
 if ENV:
@@ -189,11 +193,14 @@ if ENV:
     BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
     H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
     AUTH = None
-elif os.path.exists(AUTH_FILE):
-    AUTH = load_auth()
-    BASE = AUTH["base"]
-    H = {"Authorization": f"Bearer {AUTH['access_token']}"}
 else:
+    try:
+        AUTH = load_auth() if os.path.exists(AUTH_FILE) else None
+        BASE = AUTH["base"]
+        H = {"Authorization": f"Bearer {AUTH['access_token']}"}
+    except (ValueError, KeyError, TypeError, OSError):  # none, or unreadable: `login` again
+        AUTH = None
+if not ENV and not AUTH:
     AUTH = BASE = None
     H = {}
 
@@ -214,11 +221,22 @@ def _h():
     return H
 
 
-def _store_tokens(auth, tok):
+def _store_tokens(auth, tok, fresh=False):
+    """Keep the new tokens; on a renewal, only if the saved session is still this
+    one — a batch running in the background must not undo a `login` to another
+    store made meanwhile (it then carries on with its tokens in memory)."""
     import time
     auth["access_token"] = tok["access_token"]
     auth["refresh_token"] = tok.get("refresh_token") or auth.get("refresh_token")
     auth["expires_at"] = time.time() + int(tok.get("expires_in") or 3600)
+    if not fresh:
+        try:
+            if load_auth().get("client_id") != auth["client_id"]:
+                return
+        except (OSError, ValueError):
+            pass
+    # lazy: no lock between the check and the write; a login landing in that
+    # instant is lost. Upgrade: lock the file if two sessions ever overlap for real.
     save_auth(auth)
 
 
@@ -772,7 +790,7 @@ def cmd_login(args):
     if not tok.ok:
         sys.exit(f"token exchange refused (HTTP {tok.status_code}): {tok.text[:200]}")
     auth = {"base": base, "client_id": client_id, "token_endpoint": meta["token_endpoint"]}
-    _store_tokens(auth, tok.json())
+    _store_tokens(auth, tok.json(), fresh=True)
     who = requests.get(f"{base}/api/method/frappe.auth.get_logged_user",
                        headers={"Authorization": f"Bearer {auth['access_token']}"}, timeout=15)
     print(f"Signed in to {base} as {who.json().get('message') if who.ok else '?'} "

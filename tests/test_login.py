@@ -2,6 +2,7 @@
 mid-batch (an access token lasts an hour; a batch of guns can outlast it)."""
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
@@ -67,6 +68,16 @@ class Renewal(unittest.TestCase):
         with contextlib_all(self._patched(post)), self.assertRaises(SystemExit) as e:
             M._h()
         self.assertIn("login https://pos.example.com", str(e.exception))
+
+    def test_a_renewal_does_not_undo_a_login_to_another_store(self):
+        os.makedirs(os.path.dirname(self.auth_file))
+        with open(self.auth_file, "w") as fh:
+            json.dump({"base": "https://pos.other.com", "client_id": "c2"}, fh)
+        post = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
+        with contextlib_all(self._patched(post)):
+            self.assertEqual(M._h()["Authorization"], "Bearer new")  # this batch carries on
+        with open(self.auth_file) as fh:
+            self.assertEqual(json.load(fh)["client_id"], "c2")
 
     def test_a_key_file_session_never_refreshes(self):
         post = mock.Mock()
