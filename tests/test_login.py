@@ -166,6 +166,25 @@ class LoginGuards(unittest.TestCase):
         self.assertIn("MCP Settings", str(e.exception))
 
 
+class LoginLock(unittest.TestCase):
+    def test_the_lock_is_exclusive_and_released(self):
+        import threading
+        tmp = tempfile.mkdtemp()
+        order = []
+        with mock.patch.object(M, "AUTH_FILE", os.path.join(tmp, "auth.json")):
+            def second():
+                with M._login_lock():
+                    order.append("second")
+            with M._login_lock():
+                t = threading.Thread(target=second)
+                t.start()
+                t.join(0.3)
+                order.append("first")
+            t.join(5)
+            self.assertEqual(order, ["first", "second"])
+            self.assertFalse(os.path.exists(M.AUTH_FILE + ".lock"))
+
+
 class LoginFlow(unittest.TestCase):
     """The loopback callback: an idle browser preconnect and a favicon request
     must not use up the one answer the login waits for (codex r2)."""

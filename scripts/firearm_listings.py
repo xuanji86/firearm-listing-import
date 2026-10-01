@@ -69,7 +69,7 @@ the inline metadata below) or the repo venv `mcp/.venv/bin/python`; a bare
 # dependencies = ["requests>=2.31,<3", "pillow>=10,<13", "pillow-heif>=0.16,<1"]
 # ///
 from __future__ import annotations
-import argparse, json, os, re, sys, tempfile, time
+import argparse, contextlib, json, os, re, sys, tempfile, time
 from urllib.parse import quote, urlparse
 
 # Windows pipes/files default to the ANSI code page in strict mode: a gun title
@@ -232,8 +232,8 @@ def _renew():
             "grant_type": "refresh_token", "refresh_token": AUTH["refresh_token"],
             "client_id": AUTH["client_id"]}, timeout=30)
     except Exception as e:  # network: stop cleanly, never read as a failed write
-        sys.exit(f"could not reach the POS to renew the session ({type(e).__name__}) — "
-                 "nothing was sent for the current gun; re-run when the POS is reachable")
+        sys.exit(f"could not reach the POS to renew the session ({type(e).__name__}) — the run "
+                 "stopped before its next request; `verify` the gun it was on, then re-run")
     try:
         tok = r.json() if r.ok else {}
     except ValueError:  # a 200 that is not JSON (a proxy's error page)
@@ -772,6 +772,35 @@ def cmd_testconn(args):
                              else f"FAILED — check FRAPPE_API_KEY/SECRET in {ENV}"))
 
 
+@contextlib.contextmanager
+def _login_lock():
+    """Cross-platform, stdlib: an exclusively created lock file. One left behind
+    by a crash is taken over after 30 s (a login holds it for milliseconds)."""
+    path = AUTH_FILE + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for _ in range(300):
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(path) > 30:
+                    os.remove(path)
+                    continue
+            except OSError:
+                continue
+            time.sleep(0.1)
+    else:
+        sys.exit(f"another login holds {path} — wait for it, or delete the file")
+    try:
+        yield
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def cmd_login(args):
     """Sign in to the POS in the browser (its own OAuth, PKCE) — no API key.
 
@@ -856,14 +885,15 @@ def cmd_login(args):
     if not tok.ok:
         sys.exit(f"token exchange refused (HTTP {tok.status_code}): {tok.text[:200]}")
     auth = {"base": base, "client_id": client_id, "token_endpoint": meta["token_endpoint"]}
-    _store_tokens(auth, tok.json(), fresh=True)
-    _write_private(AUTH_FILE, {"client_id": client_id})  # now the current session
-    # Earlier sessions on this machine are superseded: drop their tokens. (They
-    # cannot be revoked from here — public clients — but an admin can in the POS.)
-    sdir = os.path.dirname(_session_file(client_id))
-    for name in os.listdir(sdir):
-        if name.endswith(".json") and name != os.path.basename(_session_file(client_id)):
-            os.remove(os.path.join(sdir, name))
+    with _login_lock():  # two logins finishing at once must not delete each other's session
+        _store_tokens(auth, tok.json(), fresh=True)
+        _write_private(AUTH_FILE, {"client_id": client_id})  # now the current session
+        # Earlier sessions on this machine are superseded: drop their tokens. (They
+        # cannot be revoked from here — public clients — but an admin can in the POS.)
+        sdir = os.path.dirname(_session_file(client_id))
+        for name in os.listdir(sdir):
+            if name.endswith(".json") and name != os.path.basename(_session_file(client_id)):
+                os.remove(os.path.join(sdir, name))
     who = requests.get(f"{base}/api/method/frappe.auth.get_logged_user",
                        headers={"Authorization": f"Bearer {auth['access_token']}"}, timeout=15)
     print(f"Signed in to {base} as {who.json().get('message') if who.ok else '?'} "
