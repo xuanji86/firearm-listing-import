@@ -205,30 +205,66 @@ def _saved_same_session():
     return _read_json(_session_file(AUTH["client_id"]))
 
 
-def _h():
-    """Request headers, renewing a `login` session's token shortly before it
-    expires (a batch of guns can outlast one access token)."""
-    if not AUTH or AUTH.get("expires_at", 0) - time.time() >= 300:
-        return H
-    # Another process sharing the session may have renewed already — and if the
-    # POS rotates refresh tokens, ours is now spent. Take its tokens first.
+# Renew this long before expiry. The first request for each gun (resolving its
+# serial) renews, so a gun's uploads and writes never straddle a renewal.
+RENEW_MARGIN = 900
+
+
+def _adopt_sibling():
+    """Take tokens another process sharing this session renewed (if the POS
+    rotates refresh tokens, ours is then spent). True if it had newer ones."""
     saved = _saved_same_session()
-    if saved and saved.get("expires_at", 0) > AUTH.get("expires_at", 0):
+    if saved and saved.get("access_token") and saved.get("expires_at", 0) > AUTH.get("expires_at", 0):
         AUTH.update(saved)
-    if AUTH.get("expires_at", 0) - time.time() < 300:
+        return True
+    return False
+
+
+def _renew():
+    hint = f"run: uv run scripts/firearm_listings.py login {AUTH['base']}"
+    if _adopt_sibling():
+        return
+    try:
         r = requests.post(AUTH["token_endpoint"], data={
             "grant_type": "refresh_token", "refresh_token": AUTH["refresh_token"],
             "client_id": AUTH["client_id"]}, timeout=30)
-        try:
-            tok = r.json() if r.ok else {}
-        except ValueError:  # a 200 that is not JSON (a proxy's error page)
-            tok = {}
-        if not isinstance(tok, dict) or not tok.get("access_token"):
-            sys.exit(f"POS session expired and could not be renewed (HTTP {r.status_code}) — "
-                     f"run: uv run scripts/firearm_listings.py login {AUTH['base']}")
-        _store_tokens(AUTH, tok)
-    H["Authorization"] = f"Bearer {AUTH['access_token']}"
+    except Exception as e:  # network: stop cleanly, never read as a failed write
+        sys.exit(f"could not reach the POS to renew the session ({type(e).__name__}) — "
+                 "nothing was sent for the current gun; re-run when the POS is reachable")
+    try:
+        tok = r.json() if r.ok else {}
+    except ValueError:  # a 200 that is not JSON (a proxy's error page)
+        tok = {}
+    if not isinstance(tok, dict) or not tok.get("access_token"):
+        time.sleep(1)  # a sibling may have just rotated the refresh token
+        if _adopt_sibling():
+            return
+        sys.exit(f"POS session expired and could not be renewed (HTTP {r.status_code}) — {hint}")
+    _store_tokens(AUTH, tok)
+
+
+def _h():
+    """Request headers; a `login` session is renewed RENEW_MARGIN before expiry."""
+    if AUTH:
+        if AUTH.get("expires_at", 0) - time.time() < RENEW_MARGIN:
+            _renew()
+        H["Authorization"] = f"Bearer {AUTH['access_token']}"
     return H
+
+
+def _call(method, url, headers=None, **kw):
+    """Every POS request goes through here: current auth, and one renew-and-retry
+    on 401 (the POS's clock or token lifetime can disagree with ours; a 401 means
+    the request was refused before it did anything, so the retry is safe)."""
+    send = getattr(requests, method)
+    r = send(url, headers={**_h(), **(headers or {})}, **kw)
+    if r.status_code == 401 and AUTH:
+        AUTH["expires_at"] = 0
+        for f in (kw.get("files") or {}).values():  # an upload's file was read to the end
+            if isinstance(f, tuple) and hasattr(f[1], "seek"):
+                f[1].seek(0)
+        r = send(url, headers={**_h(), **(headers or {})}, **kw)
+    return r
 
 
 def _store_tokens(auth, tok, fresh=False):
@@ -309,7 +345,7 @@ def _res(serial):
 def _serial_names(filt):
     """GET Serial No names matching a Frappe filter; raise on HTTP/auth error so
     a 401/500 surfaces clearly instead of masquerading as UNRESOLVED."""
-    r = requests.get(f"{BASE}/api/resource/Serial No", headers=_h(),
+    r = _call("get", f"{BASE}/api/resource/Serial No",
                      params={"filters": json.dumps(filt),
                              "fields": json.dumps(["name"])}, timeout=30)
     r.raise_for_status()
@@ -337,7 +373,7 @@ def resolve_serial(folder, overrides):
 
 
 def get_serial(name):
-    r = requests.get(_res(name), headers=_h(), timeout=30)
+    r = _call("get", _res(name), timeout=30)
     r.raise_for_status()
     return r.json()["data"]
 
@@ -494,7 +530,7 @@ def portrait_photos(fp, imgs):
 
 def upload(serial, path):
     with open(path, "rb") as fh:
-        r = requests.post(f"{BASE}/api/method/upload_file", headers=_h(),
+        r = _call("post", f"{BASE}/api/method/upload_file",
                           files={"file": (os.path.basename(path), fh, "image/jpeg")},
                           data={"is_private": "0", "doctype": "Serial No", "docname": serial},
                           timeout=180)
@@ -609,7 +645,7 @@ def cmd_attach(args):
             imgs = list_images(fp)
             if not imgs:
                 # No photos: set description (+ title) only — never blank out an existing image/gallery.
-                requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
+                _call("put", _res(serial), headers={"Content-Type": "application/json"},
                              data=json.dumps({"description": description, **title_field, **ca_flags}), timeout=120).raise_for_status()
                 print(f"  [{f} -> {serial}] no photos — set description{' + title' if title else ''} only\n"); continue
             portrait = portrait_photos(fp, imgs) or []
@@ -634,7 +670,7 @@ def cmd_attach(args):
                     primary = url
                 gallery.append({"image": url, "is_primary": 1 if i == 0 else 0, "sort_order": i, "caption": ""})
                 print(f"    {name} -> {url}{'  [PRIMARY]' if i == 0 else ''}")
-            r = requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
+            r = _call("put", _res(serial), headers={"Content-Type": "application/json"},
                              data=json.dumps({"description": description, "image": primary,
                                               "image_gallery": gallery, **title_field,
                                               **ca_flags}), timeout=120)
@@ -680,8 +716,8 @@ def cmd_push(args):
         if d.get(id_field):
             print(f"[{serial}] SKIP — already listed ({id_field}={d[id_field]})"); continue
         try:
-            r = requests.post(f"{BASE}/api/method/{method}",
-                              headers={**_h(), "Content-Type": "application/json"},
+            r = _call("post", f"{BASE}/api/method/{method}",
+                              headers={"Content-Type": "application/json"},
                               data=json.dumps({"serial_no": serial}), timeout=timeout)
             if not r.ok:
                 print(f"[{serial}] HTTP {r.status_code} {r.text[:200]}"); continue
@@ -726,7 +762,7 @@ def cmd_verify(args):
 
 def cmd_testconn(args):
     """Connectivity + auth check (no MCP needed — works on any agent via shell)."""
-    r = requests.get(f"{BASE}/api/method/frappe.auth.get_logged_user", headers=_h(), timeout=15)
+    r = _call("get", f"{BASE}/api/method/frappe.auth.get_logged_user", timeout=15)
     who = r.json().get("message") if r.ok else r.text[:120]
     print(f"BASE={BASE}\nstatus={r.status_code}  logged_in_as={who}")
     print("OK" if r.ok else ("FAILED — sign in again with `login`" if AUTH
@@ -746,11 +782,20 @@ def cmd_login(args):
     base = args.url.rstrip("/")
     if urlparse(base).scheme != "https" and not _is_local_base(base):
         sys.exit("refusing a plain-http POS URL — use https://pos.<store domain>")
-    meta = requests.get(f"{base}/.well-known/oauth-authorization-server", timeout=15)
-    if not meta.ok:
-        sys.exit(f"{base} does not offer sign-in (HTTP {meta.status_code}) — is "
+    r = requests.get(f"{base}/.well-known/oauth-authorization-server", timeout=15)
+    try:
+        meta = r.json() if r.ok else {}
+    except ValueError:
+        meta = {}
+    origin = "{0.scheme}://{0.netloc}".format(urlparse(base))
+    keys = ("authorization_endpoint", "registration_endpoint", "token_endpoint")
+    if not isinstance(meta, dict) or not all(isinstance(meta.get(k), str) for k in keys):
+        sys.exit(f"{base} does not offer sign-in (HTTP {r.status_code}) — is "
                  "MCP Settings switched on there?")
-    meta = meta.json()
+    for k in keys:  # the code, the verifier and every refresh token go to these
+        if "{0.scheme}://{0.netloc}".format(urlparse(meta[k])) != origin:
+            sys.exit(f"{base} advertises {k}={meta[k]} — not the same https origin; refusing "
+                     "(check the proxy sends X-Forwarded-Proto and host_name is set)")
     got, done = {}, threading.Event()
     verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(16)
 
@@ -767,7 +812,8 @@ def cmd_login(args):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write("Signed in — you can close this tab.".encode())
+            self.wfile.write(("Signed in — you can close this tab." if q.get("code") else
+                              f"Sign-in failed ({q.get('error', 'no code')}) — see the terminal.").encode())
             got.update(q)
             done.set()  # after the page is sent: the process may exit right away
 
@@ -781,9 +827,12 @@ def cmd_login(args):
         "client_name": "firearm-listing-import", "redirect_uris": [redirect],
         "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
         "token_endpoint_auth_method": "none", "scope": "all"}, timeout=15)
-    if not reg.ok:
+    try:
+        client_id = reg.json()["client_id"] if reg.ok else None
+    except (ValueError, KeyError, TypeError):
+        client_id = None
+    if not client_id:
         sys.exit(f"client registration refused (HTTP {reg.status_code}): {reg.text[:200]}")
-    client_id = reg.json()["client_id"]
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     url = meta["authorization_endpoint"] + "?" + urlencode({
@@ -806,6 +855,12 @@ def cmd_login(args):
     auth = {"base": base, "client_id": client_id, "token_endpoint": meta["token_endpoint"]}
     _store_tokens(auth, tok.json(), fresh=True)
     _write_private(AUTH_FILE, {"client_id": client_id})  # now the current session
+    # Earlier sessions on this machine are superseded: drop their tokens. (They
+    # cannot be revoked from here — public clients — but an admin can in the POS.)
+    sdir = os.path.dirname(_session_file(client_id))
+    for name in os.listdir(sdir):
+        if name.endswith(".json") and name != os.path.basename(_session_file(client_id)):
+            os.remove(os.path.join(sdir, name))
     who = requests.get(f"{base}/api/method/frappe.auth.get_logged_user",
                        headers={"Authorization": f"Bearer {auth['access_token']}"}, timeout=15)
     print(f"Signed in to {base} as {who.json().get('message') if who.ok else '?'} "
@@ -820,7 +875,7 @@ def cmd_setprice(args):
     if not serial or how == "fuzzy":
         print(f"[{args.serial}] UNRESOLVED or ambiguous — pass an exact serial"); return
     print(f"BASE={BASE}")
-    r = requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
+    r = _call("put", _res(serial), headers={"Content-Type": "application/json"},
                      data=json.dumps({"sell_price": args.price}), timeout=30)
     r.raise_for_status()
     print(f"[{serial}] sell_price set to {args.price}")
@@ -836,7 +891,7 @@ def cmd_settitle(args):
     if not serial or how == "fuzzy":
         print(f"[{args.serial}] UNRESOLVED or ambiguous — pass an exact serial"); return
     print(f"BASE={BASE}")
-    r = requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
+    r = _call("put", _res(serial), headers={"Content-Type": "application/json"},
                      data=json.dumps({"item_name": args.title}), timeout=30)
     r.raise_for_status()
     print(f"[{serial}] item_name (Woo title) set to {args.title!r}")

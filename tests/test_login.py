@@ -101,11 +101,68 @@ class Renewal(unittest.TestCase):
             M._h()
         self.assertIn("login https://pos.example.com", str(e.exception))
 
+    def test_a_rotated_refresh_token_is_picked_up_from_the_sibling(self):
+        import time
+        self._save(dict(self.auth))
+
+        def post(url, **k):  # refused: a sibling renewed first and rotated r1 away
+            self._save({**self.auth, "access_token": "theirs", "refresh_token": "r2",
+                        "expires_at": time.time() + 3600})
+            return _Resp(False, status=400)
+        with self._patched(post), mock.patch.object(M.time, "sleep"):
+            self.assertEqual(M._h()["Authorization"], "Bearer theirs")
+
+    def test_an_unreachable_pos_stops_cleanly(self):
+        post = mock.Mock(side_effect=OSError("connection refused"))
+        with self._patched(post), self.assertRaises(SystemExit) as e:
+            M._h()
+        self.assertIn("nothing was sent", str(e.exception))
+
+    def test_a_401_renews_once_and_retries_with_the_file_rewound(self):
+        import io as _io, time
+        self.auth["expires_at"] = time.time() + 3600  # our clock says fresh; the POS disagrees
+        renew = mock.Mock(return_value=_Resp(True, {"access_token": "new", "expires_in": 3600}))
+        fh = _io.BytesIO(b"jpeg")
+        sent = []
+
+        def upload(url, headers=None, files=None, **k):
+            sent.append((headers["Authorization"], files["file"][1].read()))
+            return _Resp(len(sent) > 1, status=200 if len(sent) > 1 else 401)
+        with self._patched(renew), mock.patch.object(M.requests, "post", side_effect=lambda url, **k:
+                renew(url, **k) if url.endswith("/token") else upload(url, **k)):
+            r = M._call("post", "https://pos.example.com/api/method/upload_file",
+                        files={"file": ("a.jpg", fh, "image/jpeg")})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(sent, [("Bearer old", b"jpeg"), ("Bearer new", b"jpeg")])
+
     def test_a_key_file_session_never_refreshes(self):
         post = mock.Mock()
         with mock.patch.object(M, "AUTH", None), mock.patch.object(M.requests, "post", post):
             M._h()
         post.assert_not_called()
+
+
+class LoginGuards(unittest.TestCase):
+    def test_endpoints_off_the_pos_origin_are_refused(self):
+        import argparse
+        meta = {"authorization_endpoint": "https://pos.example.com/auth",
+                "registration_endpoint": "https://pos.example.com/reg",
+                "token_endpoint": "http://pos.example.com/token"}  # proxy lost X-Forwarded-Proto
+        with mock.patch.object(M.requests, "get", return_value=_Resp(True, meta)), \
+                self.assertRaises(SystemExit) as e:
+            M.cmd_login(argparse.Namespace(url="https://pos.example.com"))
+        self.assertIn("token_endpoint", str(e.exception))
+
+    def test_an_html_discovery_page_is_a_clear_refusal(self):
+        import argparse
+
+        class Html(_Resp):
+            def json(self):
+                raise ValueError("not json")
+        with mock.patch.object(M.requests, "get", return_value=Html(True)), \
+                self.assertRaises(SystemExit) as e:
+            M.cmd_login(argparse.Namespace(url="https://pos.example.com"))
+        self.assertIn("MCP Settings", str(e.exception))
 
 
 class LoginFlow(unittest.TestCase):
@@ -115,8 +172,9 @@ class LoginFlow(unittest.TestCase):
     def test_the_real_callback_is_awaited_past_noise(self):
         import argparse, socket, threading, urllib.error, urllib.request
         from urllib.parse import parse_qs, urlparse
-        meta = {"registration_endpoint": "R", "authorization_endpoint": "https://pos.example.com/auth",
-                "token_endpoint": "T"}
+        meta = {"registration_endpoint": "https://pos.example.com/R",
+                "authorization_endpoint": "https://pos.example.com/auth",
+                "token_endpoint": "https://pos.example.com/T"}
 
         def get(url, **k):
             if url.endswith("oauth-authorization-server"):
@@ -124,7 +182,7 @@ class LoginFlow(unittest.TestCase):
             return _Resp(True, {"message": "tom@example.com"})
 
         def post(url, **k):
-            if url == "R":
+            if url.endswith("/R"):
                 return _Resp(True, {"client_id": "c9"}, 201)
             self.assertEqual(k["data"]["code"], "the-code")
             return _Resp(True, {"access_token": "a", "refresh_token": "r", "expires_in": 3600})
@@ -146,6 +204,9 @@ class LoginFlow(unittest.TestCase):
 
         tmp = tempfile.mkdtemp()
         auth_file = os.path.join(tmp, "auth.json")
+        with mock.patch.object(M, "AUTH_FILE", auth_file):
+            old = M._session_file("c-old")
+            M._write_private(old, {"client_id": "c-old", "refresh_token": "stale"})
         with mock.patch.object(M.requests, "get", get), mock.patch.object(M.requests, "post", post), \
                 mock.patch.object(M, "AUTH_FILE", auth_file), \
                 mock.patch("webbrowser.open", browser), \
@@ -155,6 +216,7 @@ class LoginFlow(unittest.TestCase):
             saved = M.load_auth()
         self.assertEqual((saved["base"], saved["client_id"], saved["access_token"]),
                          ("https://pos.example.com", "c9", "a"))
+        self.assertFalse(os.path.exists(old), "a superseded session's tokens are dropped")
 
 
 if __name__ == "__main__":
