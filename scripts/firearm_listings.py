@@ -43,8 +43,13 @@ Subcommands (run `resolve` first — it is read-only):
 --map is a JSON object of {folder_name: actual_serial_no} for folders whose name
 differs from the Serial No record (case/prefix/typo, or a corrected serial).
 
-Credentials + target site come from mcp/.env (FRAPPE_BASE_URL/API_KEY/API_SECRET).
-NOTE: that .env points at PRODUCTION. attach/push are live writes.
+  login URL
+      Sign in to the POS in the browser (its own OAuth) — no API key. The session
+      is kept in ~/.config/firearm-listing-import/auth.json and renews itself.
+
+Credentials + target site: FIREARM_ENV (an API-key file, FRAPPE_BASE_URL/
+API_KEY/API_SECRET — e.g. a dev site to rehearse), else the `login` session,
+else mcp/.env above this script. NOTE: production — attach/push are live writes.
 
 Channels: `push`/`verify` take --channel woo (default) or gunbroker. Both call a
 whitelisted method on the POS, which owns the credentials — and for GunBroker
@@ -75,15 +80,19 @@ for _s in (sys.stdout, sys.stderr):
 import requests
 
 def _find_env():
-    """Walk up from this script to the repo root (the dir containing mcp/.env).
+    """The API-key file, or None when this machine signs in with `login` instead.
 
-    Uses realpath so this works when the skill is invoked through a symlink
-    (e.g. Codex loading it from ~/.codex/skills/ -> the repo). Override with the
-    FIREARM_ENV env var if the layout differs (e.g. the skill was copied, not
-    symlinked, onto a machine where the repo lives elsewhere)."""
+    FIREARM_ENV (an explicit key file — e.g. a dev site to rehearse against)
+    wins; then a `login` session; then mcp/.env walked up from this script
+    (realpath, so a symlinked skill still finds its repo)."""
     if os.environ.get("FIREARM_ENV"):
         return os.environ["FIREARM_ENV"]
-    return _find_env_from(os.path.dirname(os.path.realpath(__file__)))  # realpath: resolve symlinks
+    if os.path.exists(AUTH_FILE):
+        return None
+    try:
+        return _find_env_from(os.path.dirname(os.path.realpath(__file__)))  # realpath: resolve symlinks
+    except FileNotFoundError:
+        return None
 
 
 def _find_env_from(d):
@@ -101,6 +110,9 @@ def _find_env_from(d):
         "outside the repo, set FIREARM_ENV=/path/to/gunstore-pos/mcp/.env")
 
 
+# `login` keeps the signed-in session here (the POS's own OAuth: no API key).
+AUTH_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                         "firearm-listing-import", "auth.json")
 ENV = _find_env()
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 MAXPX, QUALITY = 2000, 80          # resize target: long edge px, JPEG quality
@@ -160,9 +172,54 @@ def load_cfg():
     return cfg
 
 
-CFG = load_cfg()
-BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
-H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
+def load_auth():
+    with open(AUTH_FILE, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save_auth(auth):
+    os.makedirs(os.path.dirname(AUTH_FILE), exist_ok=True)
+    fd = os.open(AUTH_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # holds a refresh token
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(auth, fh)
+
+
+if ENV:
+    CFG = load_cfg()
+    BASE = CFG["FRAPPE_BASE_URL"].rstrip("/")
+    H = {"Authorization": f"token {CFG['FRAPPE_API_KEY']}:{CFG['FRAPPE_API_SECRET']}"}
+    AUTH = None
+elif os.path.exists(AUTH_FILE):
+    AUTH = load_auth()
+    BASE = AUTH["base"]
+    H = {"Authorization": f"Bearer {AUTH['access_token']}"}
+else:
+    AUTH = BASE = None
+    H = {}
+
+
+def _h():
+    """Request headers, refreshing a `login` session's token shortly before it
+    expires (a batch of guns can outlast one access token)."""
+    import time
+    if AUTH and AUTH.get("expires_at", 0) - time.time() < 300:
+        r = requests.post(AUTH["token_endpoint"], data={
+            "grant_type": "refresh_token", "refresh_token": AUTH["refresh_token"],
+            "client_id": AUTH["client_id"]}, timeout=30)
+        if not r.ok:
+            sys.exit(f"POS session expired and could not be renewed (HTTP {r.status_code}) — "
+                     f"run: uv run scripts/firearm_listings.py login {AUTH['base']}")
+        _store_tokens(AUTH, r.json())
+        H["Authorization"] = f"Bearer {AUTH['access_token']}"
+    return H
+
+
+def _store_tokens(auth, tok):
+    import time
+    auth["access_token"] = tok["access_token"]
+    auth["refresh_token"] = tok.get("refresh_token") or auth.get("refresh_token")
+    auth["expires_at"] = time.time() + int(tok.get("expires_in") or 3600)
+    save_auth(auth)
 
 
 # --- the production gate ---------------------------------------------------
@@ -231,7 +288,7 @@ def _res(serial):
 def _serial_names(filt):
     """GET Serial No names matching a Frappe filter; raise on HTTP/auth error so
     a 401/500 surfaces clearly instead of masquerading as UNRESOLVED."""
-    r = requests.get(f"{BASE}/api/resource/Serial No", headers=H,
+    r = requests.get(f"{BASE}/api/resource/Serial No", headers=_h(),
                      params={"filters": json.dumps(filt),
                              "fields": json.dumps(["name"])}, timeout=30)
     r.raise_for_status()
@@ -259,7 +316,7 @@ def resolve_serial(folder, overrides):
 
 
 def get_serial(name):
-    r = requests.get(_res(name), headers=H, timeout=30)
+    r = requests.get(_res(name), headers=_h(), timeout=30)
     r.raise_for_status()
     return r.json()["data"]
 
@@ -416,7 +473,7 @@ def portrait_photos(fp, imgs):
 
 def upload(serial, path):
     with open(path, "rb") as fh:
-        r = requests.post(f"{BASE}/api/method/upload_file", headers=H,
+        r = requests.post(f"{BASE}/api/method/upload_file", headers=_h(),
                           files={"file": (os.path.basename(path), fh, "image/jpeg")},
                           data={"is_private": "0", "doctype": "Serial No", "docname": serial},
                           timeout=180)
@@ -531,7 +588,7 @@ def cmd_attach(args):
             imgs = list_images(fp)
             if not imgs:
                 # No photos: set description (+ title) only — never blank out an existing image/gallery.
-                requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+                requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
                              data=json.dumps({"description": description, **title_field, **ca_flags}), timeout=120).raise_for_status()
                 print(f"  [{f} -> {serial}] no photos — set description{' + title' if title else ''} only\n"); continue
             portrait = portrait_photos(fp, imgs) or []
@@ -556,7 +613,7 @@ def cmd_attach(args):
                     primary = url
                 gallery.append({"image": url, "is_primary": 1 if i == 0 else 0, "sort_order": i, "caption": ""})
                 print(f"    {name} -> {url}{'  [PRIMARY]' if i == 0 else ''}")
-            r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+            r = requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
                              data=json.dumps({"description": description, "image": primary,
                                               "image_gallery": gallery, **title_field,
                                               **ca_flags}), timeout=120)
@@ -603,7 +660,7 @@ def cmd_push(args):
             print(f"[{serial}] SKIP — already listed ({id_field}={d[id_field]})"); continue
         try:
             r = requests.post(f"{BASE}/api/method/{method}",
-                              headers={**H, "Content-Type": "application/json"},
+                              headers={**_h(), "Content-Type": "application/json"},
                               data=json.dumps({"serial_no": serial}), timeout=timeout)
             if not r.ok:
                 print(f"[{serial}] HTTP {r.status_code} {r.text[:200]}"); continue
@@ -648,10 +705,80 @@ def cmd_verify(args):
 
 def cmd_testconn(args):
     """Connectivity + auth check (no MCP needed — works on any agent via shell)."""
-    r = requests.get(f"{BASE}/api/method/frappe.auth.get_logged_user", headers=H, timeout=15)
+    r = requests.get(f"{BASE}/api/method/frappe.auth.get_logged_user", headers=_h(), timeout=15)
     who = r.json().get("message") if r.ok else r.text[:120]
     print(f"BASE={BASE}\nstatus={r.status_code}  logged_in_as={who}")
-    print("OK" if r.ok else "FAILED — check FRAPPE_API_KEY/SECRET in mcp/.env")
+    print("OK" if r.ok else ("FAILED — sign in again with `login`" if AUTH
+                             else "FAILED — check FRAPPE_API_KEY/SECRET in mcp/.env"))
+
+
+def cmd_login(args):
+    """Sign in to the POS in the browser (its own OAuth, PKCE) — no API key.
+
+    Registers this machine as an OAuth client (dynamic registration, a loopback
+    redirect), opens the POS sign-in/approve page, and keeps the tokens in
+    AUTH_FILE (mode 600). Writes then carry the signed-in person's own name and
+    POS roles. Signing in to another store replaces the session."""
+    import base64, hashlib, secrets, webbrowser
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlencode
+    base = args.url.rstrip("/")
+    if urlparse(base).scheme != "https" and not _is_local_base(base):
+        sys.exit("refusing a plain-http POS URL — use https://pos.<store domain>")
+    meta = requests.get(f"{base}/.well-known/oauth-authorization-server", timeout=15)
+    if not meta.ok:
+        sys.exit(f"{base} does not offer sign-in (HTTP {meta.status_code}) — is "
+                 "MCP Settings switched on there?")
+    meta = meta.json()
+    got = {}
+
+    class Callback(BaseHTTPRequestHandler):
+        def do_GET(self):
+            got.update({k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("Signed in — you can close this tab.".encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Callback)
+    redirect = f"http://127.0.0.1:{srv.server_port}/callback"
+    reg = requests.post(meta["registration_endpoint"], json={
+        "client_name": "firearm-listing-import", "redirect_uris": [redirect],
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "token_endpoint_auth_method": "none", "scope": "all"}, timeout=15)
+    if not reg.ok:
+        sys.exit(f"client registration refused (HTTP {reg.status_code}): {reg.text[:200]}")
+    client_id = reg.json()["client_id"]
+    verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(16)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    url = meta["authorization_endpoint"] + "?" + urlencode({
+        "response_type": "code", "client_id": client_id, "redirect_uri": redirect,
+        "scope": "all", "state": state, "code_challenge": challenge,
+        "code_challenge_method": "S256"})
+    print(f"Opening the POS sign-in page. If no browser opens, visit:\n  {url}")
+    webbrowser.open(url)
+    srv.timeout = 300
+    srv.handle_request()  # one redirect back, or give up after 5 minutes
+    srv.server_close()
+    if got.get("state") != state or "code" not in got:
+        sys.exit(f"sign-in did not complete: {got.get('error') or 'no answer within 5 minutes'}")
+    tok = requests.post(meta["token_endpoint"], data={
+        "grant_type": "authorization_code", "code": got["code"], "redirect_uri": redirect,
+        "client_id": client_id, "code_verifier": verifier}, timeout=30)
+    if not tok.ok:
+        sys.exit(f"token exchange refused (HTTP {tok.status_code}): {tok.text[:200]}")
+    auth = {"base": base, "client_id": client_id, "token_endpoint": meta["token_endpoint"]}
+    _store_tokens(auth, tok.json())
+    who = requests.get(f"{base}/api/method/frappe.auth.get_logged_user",
+                       headers={"Authorization": f"Bearer {auth['access_token']}"}, timeout=15)
+    print(f"Signed in to {base} as {who.json().get('message') if who.ok else '?'} "
+          f"(session kept in {AUTH_FILE})")
+    if os.environ.get("FIREARM_ENV"):
+        print("!! FIREARM_ENV is set, and it wins over this session — unset it to use the login.")
 
 
 def cmd_setprice(args):
@@ -660,7 +787,7 @@ def cmd_setprice(args):
     if not serial or how == "fuzzy":
         print(f"[{args.serial}] UNRESOLVED or ambiguous — pass an exact serial"); return
     print(f"BASE={BASE}")
-    r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+    r = requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
                      data=json.dumps({"sell_price": args.price}), timeout=30)
     r.raise_for_status()
     print(f"[{serial}] sell_price set to {args.price}")
@@ -676,7 +803,7 @@ def cmd_settitle(args):
     if not serial or how == "fuzzy":
         print(f"[{args.serial}] UNRESOLVED or ambiguous — pass an exact serial"); return
     print(f"BASE={BASE}")
-    r = requests.put(_res(serial), headers={**H, "Content-Type": "application/json"},
+    r = requests.put(_res(serial), headers={**_h(), "Content-Type": "application/json"},
                      data=json.dumps({"item_name": args.title}), timeout=30)
     r.raise_for_status()
     print(f"[{serial}] item_name (Woo title) set to {args.title!r}")
@@ -734,6 +861,8 @@ def main():
                             help=f"sales channel (default: {DEFAULT_CHANNEL}). "
                                  f"gunbroker needs {ALLOW_PROD_ENV}=1 off a local site")
     sub.add_parser("testconn")  # bare connectivity/auth check
+    sp = sub.add_parser("login")
+    sp.add_argument("url", help="the store's POS, e.g. https://pos.oldsteelarsenal.com")
     sp = sub.add_parser("rotate")
     sp.add_argument("--root", required=True, help="folder of <serial>/ subfolders")
     sp.add_argument("--folder", required=True, help="serial folder name, exactly as on disk")
@@ -747,7 +876,11 @@ def main():
     sp.add_argument("--serial", required=True, help="serial number (or folder name)")
     sp.add_argument("--title", required=True, help="per-gun Woo listing title (Serial No.item_name)")
     args = p.parse_args()
-    {"resolve": cmd_resolve, "attach": cmd_attach, "push": cmd_push, "verify": cmd_verify,
+    if not BASE and args.cmd not in ("login", "rotate"):
+        sys.exit("Not signed in to a POS. Run once:\n"
+                 "  uv run scripts/firearm_listings.py login https://pos.oldsteelarsenal.com\n"
+                 "(or set FIREARM_ENV to an API-key file)")
+    {"login": cmd_login, "resolve": cmd_resolve, "attach": cmd_attach, "push": cmd_push, "verify": cmd_verify,
      "testconn": cmd_testconn, "setprice": cmd_setprice, "settitle": cmd_settitle,
      "rotate": cmd_rotate}[args.cmd](args)
 

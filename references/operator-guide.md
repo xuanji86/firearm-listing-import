@@ -1,8 +1,8 @@
 # Operator Guide (no technical background needed)
 
-Step-by-step guide for the person at the shop: first-time key setup, listing guns, checking the result in WooCommerce. Every step can be done by the AI assistant (Claude Code or Codex). Where you see `👉 Tell the assistant:`, say that — no commands to type.
+Step-by-step guide for the person at the shop: first-time sign-in, listing guns, checking the result in WooCommerce. Every step can be done by the AI assistant (Claude Code or Codex). Where you see `👉 Tell the assistant:`, say that — no commands to type.
 
-Note for the assistant: when the user is non-technical, new, needs the API key set up, or says "walk me through it", follow this guide section by section, run the commands yourself, report each result in plain language, and ask before continuing. Prefer `scripts/firearm_listings.py` (works on any agent) over agent-specific tools.
+Note for the assistant: when the user is non-technical, new, needs to sign in for the first time, or says "walk me through it", follow this guide section by section, run the commands yourself, report each result in plain language, and ask before continuing. Prefer `scripts/firearm_listings.py` (works on any agent) over agent-specific tools.
 
 ---
 
@@ -18,23 +18,17 @@ Takes a folder on your computer with one subfolder per gun (photos + a descripti
 
 ---
 
-## Part 1: API key (one-time)
+## Part 1: Sign in to the POS (one-time)
 
-The tool needs a key to log in to the POS. Generate it on the POS site and store it in the project.
+No key to copy. You sign in with your own POS account, the same one you use at the counter.
 
-1. Open **https://pos.oldsteelarsenal.com** and log in as an **administrator**.
-2. Click your avatar / name (top right) → **My Settings**.
-3. Scroll to **API Access** → **Generate Keys**.
-4. Two values appear: **API Key** (always visible) and **API Secret** (**shown once only** — copy it now).
-5. Put them in the project's `mcp/.env`:
-   ```
-   FRAPPE_API_KEY=<paste API Key>
-   FRAPPE_API_SECRET=<paste API Secret>
-   ```
-   👉 Tell the assistant: **"Put this API Key and Secret into mcp/.env"** and paste both values.
-6. Verify: 👉 **"Test the POS and WooCommerce connections"**. "OK" means setup is done.
+1. 👉 Tell the assistant: **"Sign in to the POS for listing"** (CGA: say "the CGA POS").
+   It runs `login https://pos.oldsteelarsenal.com` (CGA: `https://pos.caligunsandammo.com`) and a browser page opens.
+2. Sign in to the POS if asked, then click **Allow**. The page says "Signed in — you can close this tab."
+3. Connect the assistant's POS tools the same way: 👉 **"Connect the gunstore-pos connector"**. A browser page opens; sign in and click **Allow**.
+4. Verify: 👉 **"Test the POS and WooCommerce connections"**. It shows your name; "OK" means setup is done.
 
-⚠️ The key is your login. Do not screenshot it into group chats or share it. If leaked, repeat step 3 — the old key stops working.
+Everything you do is recorded under your name in the POS. If the assistant later says the POS session expired, repeat step 1.
 
 ---
 
@@ -149,7 +143,7 @@ The only proof is that you can no longer find the listing on GunBroker. All of t
 | "I don't have that tool" / no `gb_end_listing` | GunBroker write tools are off on this machine; it did not try |
 | Error, timeout, or anything unclear | Treat as not ended |
 
-> For whoever deploys the MCP: `gb_push_serial` and `gb_end_listing` share one switch, `GUNSTORE_MCP_GUNBROKER_ACTIONS=1`. A machine that can list but not end is the worst configuration.
+> The GunBroker tools are on the store's full connector when that store has GunBroker switched on in the POS. "I don't have that tool" means you are on the read-only connector or GunBroker is off for this store.
 
 A gun sold at the counter and still on GunBroker can be sold twice.
 
@@ -184,7 +178,7 @@ Subscribers to new-arrival alerts can get a digest with the guns just listed, wi
 
 | Situation | 👉 Tell the assistant |
 |---|---|
-| First-time setup | "Set up the POS API key and walk me through it" |
+| First-time setup | "Sign me in to the POS and walk me through it" |
 | Check the plan only | "Resolve `<folder>` without writing anything" |
 | List everything | "Update and list the guns in `<folder>` on woo" |
 | Unpriced (`UNPRICED $0`) | "Set the sell price of serial X to 1234, then list it" |
@@ -205,4 +199,4 @@ Subscribers to new-arrival alerts can get a digest with the guns just listed, wi
 
 - This edits the **live store**. The assistant shows the plan and does one gun first; when unsure, stop and ask.
 - GunBroker is restricted to the test site. "REFUSED" is the guard; do not bypass it.
-- Keep the API key private; regenerate it in the POS if leaked.
+- Never share your POS password. If a laptop is lost, an administrator revokes its session in the POS (OAuth Bearer Token list).
